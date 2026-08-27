@@ -102,9 +102,7 @@ async def test_read_file_escape_is_a_recoverable_tool_result(workspace: Path) ->
 
     events = [event async for event in application.run("Read outside.txt")]
 
-    assert ToolFinished(
-        call_id="call-escape", tool_name="read_file", is_error=True
-    ) in events
+    assert ToolFinished(call_id="call-escape", tool_name="read_file", is_error=True) in events
     continuation = sessions.records[2].payload
     assert continuation.results[0].is_error is True
     assert "outside the workspace" in continuation.results[0].content.lower()
@@ -114,6 +112,4 @@ async def test_read_file_escape_is_a_recoverable_tool_result(workspace: Path) ->
 @pytest.mark.asyncio
 async def test_duplicate_tool_names_are_rejected(workspace: Path) -> None:
     with pytest.raises(ValueError, match="duplicate tool name: read_file"):
-        await ToolCatalog.create(
-            [BuiltinToolSource(workspace), BuiltinToolSource(workspace)]
-        )
+        await ToolCatalog.create([BuiltinToolSource(workspace), BuiltinToolSource(workspace)])
