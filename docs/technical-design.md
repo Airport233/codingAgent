@@ -367,15 +367,16 @@ pytest-cov 负责收集 statement/branch 数据并输出 coverage JSON/XML；仓
 每个主体模块使用独立短生命周期分支：
 
 ```text
-feature/provider
-feature/agent-loop
+feature/project-scaffold
+feature/walking-skeleton
+feature/provider-anthropic
 feature/tools-read-search
 feature/tools-write-edit
 feature/shell
 feature/sessions
-feature/context
 feature/memory
-feature/cli
+feature/context-compaction
+feature/cli-hardening
 ```
 
 每个分支遵循：
