@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 
 from coding_agent.domain import (
@@ -18,7 +19,7 @@ from coding_agent.events import (
     ToolStarted,
 )
 from coding_agent.providers.base import Provider, ProviderResponseFinished, ProviderTextDelta
-from coding_agent.sessions.memory import InMemorySessionStore
+from coding_agent.sessions.base import SessionStore
 from coding_agent.tools.dispatcher import ToolDispatcher
 
 
@@ -27,7 +28,7 @@ class AgentApplication:
         self,
         provider: Provider,
         dispatcher: ToolDispatcher,
-        sessions: InMemorySessionStore,
+        sessions: SessionStore,
         max_steps: int = 20,
     ) -> None:
         self._provider = provider
@@ -60,9 +61,35 @@ class AgentApplication:
             if response.tool_uses:
                 results = []
                 for call in response.tool_uses:
+                    await self._sessions.append(
+                        "tool_started",
+                        {
+                            "call_id": call.call_id,
+                            "tool_name": call.name,
+                            "input": call.input,
+                        },
+                    )
                     yield ToolStarted(call_id=call.call_id, tool_name=call.name)
-                    result = await self._dispatcher.execute(call)
+                    try:
+                        result = await self._dispatcher.execute(call)
+                    except asyncio.CancelledError:
+                        await self._sessions.append(
+                            "tool_cancelled",
+                            {"call_id": call.call_id, "tool_name": call.name},
+                        )
+                        await self._sessions.append("turn_cancelled", {"phase": "tool_execution"})
+                        raise
                     results.append(result)
+                    await self._sessions.append(
+                        "tool_finished",
+                        {
+                            "call_id": call.call_id,
+                            "tool_name": call.name,
+                            "is_error": result.is_error,
+                            "model_content": result.content,
+                            "metadata": result.metadata,
+                        },
+                    )
                     yield ToolFinished(
                         call_id=call.call_id,
                         tool_name=call.name,

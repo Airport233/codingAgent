@@ -1,15 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 from pathlib import Path
 
 import pytest
-from coding_agent.sessions.jsonl import (
-    JsonlSessionRepository,
-    Redactor,
-    SessionCorruptError,
-)
 
 from coding_agent.domain import (
     AssistantExchange,
@@ -21,6 +17,11 @@ from coding_agent.domain import (
     ToolUseBlock,
     UnknownProviderBlock,
     UserExchange,
+)
+from coding_agent.sessions.jsonl import (
+    JsonlSessionRepository,
+    Redactor,
+    SessionCorruptError,
 )
 
 
@@ -211,3 +212,39 @@ async def test_redactor_removes_known_secrets_and_auth_fields_before_disk(
     assert "internal.example" not in persisted
     assert persisted.count("[REDACTED]") >= 3
     assert '"safe":"keep"' in persisted
+
+
+@pytest.mark.asyncio
+async def test_concurrent_appends_are_serialized_with_unique_sequences(
+    roots: tuple[Path, Path, Path],
+) -> None:
+    data_root, project, _ = roots
+    store = await JsonlSessionRepository(data_root).create(project)
+
+    await asyncio.gather(*(store.append("diagnostic", {"index": index}) for index in range(20)))
+
+    decoded = [
+        json.loads(line) for line in store.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [event["sequence"] for event in decoded] == list(range(1, 22))
+    assert {event["payload"]["index"] for event in decoded[1:]} == set(range(20))
+
+
+@pytest.mark.asyncio
+async def test_unknown_optional_envelope_fields_do_not_block_recovery(
+    roots: tuple[Path, Path, Path],
+) -> None:
+    data_root, project, _ = roots
+    repository = JsonlSessionRepository(data_root)
+    store = await repository.create(project)
+    await store.append("user_exchange", UserExchange("keep me"))
+    lines = store.events_path.read_text(encoding="utf-8").splitlines()
+    event = json.loads(lines[1])
+    event["future_optional_field"] = {"enabled": True}
+    lines[1] = json.dumps(event)
+    store.events_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    recovered = await repository.resume_latest(project)
+
+    assert recovered is not None
+    assert recovered.conversation == (UserExchange("keep me"),)
