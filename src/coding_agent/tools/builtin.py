@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 from coding_agent.tools.base import RecoverableToolError, Tool, ToolOutput
 from coding_agent.tools.files import EditFileTool, MkdirTool, WriteFileTool
 from coding_agent.tools.search import CodeSearchTool
+from coding_agent.tools.shell import ShellTool
 from coding_agent.tools.workspace import ReadSet, WorkspaceGuard
 
 
@@ -86,4 +87,5 @@ class BuiltinToolSource:
             WriteFileTool(self._workspace, self._read_set),
             MkdirTool(self._workspace),
             EditFileTool(self._workspace, self._read_set),
+            ShellTool(self._workspace),
         )

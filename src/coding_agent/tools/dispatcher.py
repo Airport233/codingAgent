@@ -32,4 +32,5 @@ class ToolDispatcher:
             tool_use_id=call.call_id,
             content=output.content,
             is_error=False,
+            metadata=output.metadata,
         )

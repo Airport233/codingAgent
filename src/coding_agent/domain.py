@@ -67,6 +67,7 @@ class ToolResultBlock:
     tool_use_id: str
     content: str
     is_error: bool
+    metadata: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
