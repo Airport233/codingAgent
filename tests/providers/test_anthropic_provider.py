@@ -93,6 +93,7 @@ async def test_provider_uses_low_level_messages_stream_and_internal_events() -> 
         async for event in provider.stream(
             (UserExchange(content="Say hello"),),
             (tool,),
+            system_instructions="project memory",
         )
     ]
 
@@ -110,6 +111,7 @@ async def test_provider_uses_low_level_messages_stream_and_internal_events() -> 
                     "input_schema": {"type": "object", "properties": {}},
                 }
             ],
+            "system": "project memory",
             "extra_body": {"thinking_effort": "high"},
         }
     ]
