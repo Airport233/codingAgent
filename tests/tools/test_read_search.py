@@ -69,9 +69,7 @@ async def test_code_search_supports_regular_expressions(workspace: Path) -> None
     (workspace / "main.py").write_text("value_1\nvalue_x\nvalue_22\n", encoding="utf-8")
     tool = CodeSearchTool(workspace, rg_executable=None)
 
-    result = await tool.execute(
-        CodeSearchInput(query=r"value_\d+$", regex=True, max_results=10)
-    )
+    result = await tool.execute(CodeSearchInput(query=r"value_\d+$", regex=True, max_results=10))
 
     assert result.content.splitlines() == ["main.py:1:value_1", "main.py:3:value_22"]
 
@@ -82,3 +80,28 @@ async def test_code_search_invalid_regex_is_recoverable(workspace: Path) -> None
 
     with pytest.raises(RecoverableToolError, match="Invalid regular expression"):
         await tool.execute(CodeSearchInput(query="[", regex=True))
+
+
+def test_ripgrep_json_parser_ignores_non_matches_and_normalizes_paths() -> None:
+    output = b"\n".join(
+        (
+            b'{"type":"begin","data":{"path":{"text":"src\\\\a.py"}}}',
+            b'{"type":"match","data":{"path":{"text":"src\\\\a.py"},'
+            b'"lines":{"text":"needle\\n"},"line_number":4}}',
+        )
+    )
+
+    assert CodeSearchTool._parse_ripgrep_json(output, max_results=10) == ["src/a.py:4:needle"]
+
+
+@pytest.mark.asyncio
+async def test_ripgrep_backend_is_used_when_available(workspace: Path) -> None:
+    rg = shutil.which("rg")
+    if rg is None:
+        pytest.skip("ripgrep is not installed on this platform")
+    (workspace / "main.py").write_text("needle here\n", encoding="utf-8")
+    tool = CodeSearchTool(workspace, rg_executable=rg)
+
+    result = await tool.execute(CodeSearchInput(query="needle", glob="*.py"))
+
+    assert "main.py:1:needle here" in result.content
