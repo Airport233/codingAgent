@@ -14,11 +14,32 @@ class ProviderTextDelta:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderThinkingDelta:
+    thinking: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderThinkingSignatureDelta:
+    signature: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderUsageUpdated:
+    usage: dict[str, int]
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderResponseFinished:
     exchange: AssistantExchange
 
 
-type ProviderEvent = ProviderTextDelta | ProviderResponseFinished
+type ProviderEvent = (
+    ProviderTextDelta
+    | ProviderThinkingDelta
+    | ProviderThinkingSignatureDelta
+    | ProviderUsageUpdated
+    | ProviderResponseFinished
+)
 
 
 class Provider(Protocol):

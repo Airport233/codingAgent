@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from coding_agent.domain import (
     AssistantExchange,
+    RedactedThinkingBlock,
+    TextBlock,
     ThinkingBlock,
     ToolContinuationExchange,
     ToolResultBlock,
     ToolUseBlock,
+    UnknownProviderBlock,
     UserExchange,
 )
 from coding_agent.providers.anthropic_messages import encode_conversation
@@ -67,3 +70,35 @@ def test_tool_continuation_round_trips_thinking_and_orders_results_first() -> No
             ],
         },
     ]
+
+
+def test_encodes_assistant_block_variants_without_mutating_raw_data() -> None:
+    redacted_raw = {"type": "redacted_thinking", "data": "opaque"}
+    unknown_raw = {"type": "future_block", "payload": {"value": 1}}
+    exchange = AssistantExchange(
+        blocks=(
+            TextBlock("hello"),
+            ThinkingBlock("reason", "signature"),
+            RedactedThinkingBlock("opaque", raw=redacted_raw),
+            ToolUseBlock("call-2", "read_file", {"path": "a.txt"}),
+            UnknownProviderBlock("future_block", raw=unknown_raw),
+        ),
+        stop_reason="end_turn",
+    )
+
+    messages = encode_conversation((exchange,))
+
+    assert messages[0]["content"] == [
+        {"type": "text", "text": "hello"},
+        {"type": "thinking", "thinking": "reason", "signature": "signature"},
+        {"type": "redacted_thinking", "data": "opaque"},
+        {
+            "type": "tool_use",
+            "id": "call-2",
+            "name": "read_file",
+            "input": {"path": "a.txt"},
+        },
+        unknown_raw,
+    ]
+    assert redacted_raw == {"type": "redacted_thinking", "data": "opaque"}
+    assert unknown_raw == {"type": "future_block", "payload": {"value": 1}}
