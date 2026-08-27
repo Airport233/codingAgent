@@ -163,14 +163,14 @@ class WindowsPowerShellBackend:
             env=environment,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+            creationflags=cast(Any, subprocess).CREATE_NEW_PROCESS_GROUP,
         )
 
     async def terminate(self, process: asyncio.subprocess.Process, grace_seconds: float) -> None:
         if process.returncode is not None:
             return
         try:
-            process.send_signal(signal.CTRL_BREAK_EVENT)
+            process.send_signal(cast(Any, signal).CTRL_BREAK_EVENT)
             await asyncio.wait_for(process.wait(), timeout=grace_seconds)
             return
         except (TimeoutError, OSError, ProcessLookupError):
