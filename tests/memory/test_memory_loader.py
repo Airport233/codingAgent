@@ -4,10 +4,10 @@ import shutil
 from pathlib import Path
 
 import pytest
-from coding_agent.memory.loader import MemoryLoadError, ProjectMemoryLoader
 
 from coding_agent.application import AgentApplication
 from coding_agent.domain import AssistantExchange, TextBlock
+from coding_agent.memory.loader import MemoryLoadError, ProjectMemoryLoader
 from coding_agent.providers.fake import FakeProvider
 from coding_agent.sessions.memory import InMemorySessionStore
 from coding_agent.tools.builtin import BuiltinToolSource

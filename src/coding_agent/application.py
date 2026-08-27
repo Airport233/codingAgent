@@ -18,6 +18,7 @@ from coding_agent.events import (
     ToolFinished,
     ToolStarted,
 )
+from coding_agent.memory.loader import ProjectMemoryLoader
 from coding_agent.providers.base import Provider, ProviderResponseFinished, ProviderTextDelta
 from coding_agent.sessions.base import SessionStore
 from coding_agent.tools.dispatcher import ToolDispatcher
@@ -30,11 +31,14 @@ class AgentApplication:
         dispatcher: ToolDispatcher,
         sessions: SessionStore,
         max_steps: int = 20,
+        memory_loader: ProjectMemoryLoader | None = None,
     ) -> None:
         self._provider = provider
         self._dispatcher = dispatcher
         self._sessions = sessions
         self._max_steps = max_steps
+        self._memory_loader = memory_loader
+        self._last_memory_digest: str | None = None
         self._conversation = Conversation()
 
     async def run(self, prompt: str) -> AsyncIterator[CoreEvent]:
@@ -45,8 +49,30 @@ class AgentApplication:
 
         for _step in range(self._max_steps):
             response: AssistantExchange | None = None
+            system_instructions: str | None = None
+            if self._memory_loader is not None:
+                memory = self._memory_loader.load()
+                system_instructions = memory.rendered or None
+                if memory.digest != self._last_memory_digest:
+                    await self._sessions.append(
+                        "memory_snapshot_changed",
+                        {
+                            "digest": memory.digest,
+                            "entries": [
+                                {
+                                    "source": entry.source,
+                                    "priority": entry.priority,
+                                    "content": entry.content,
+                                }
+                                for entry in memory.entries
+                            ],
+                        },
+                    )
+                    self._last_memory_digest = memory.digest
             async for event in self._provider.stream(
-                self._conversation.snapshot(), self._dispatcher.catalog.specs
+                self._conversation.snapshot(),
+                self._dispatcher.catalog.specs,
+                system_instructions,
             ):
                 if isinstance(event, ProviderTextDelta):
                     yield TextDelta(text=event.text)

@@ -35,6 +35,7 @@ class AnthropicMessagesProvider:
         self,
         conversation: tuple[ConversationExchange, ...],
         tools: tuple[ToolSpec, ...],
+        system_instructions: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         aggregator = AnthropicStreamAggregator()
         request_tools = [
@@ -45,13 +46,16 @@ class AnthropicMessagesProvider:
             }
             for tool in tools
         ]
-        async with self._client.messages.stream(
-            model=self._model,
-            max_tokens=self._max_tokens,
-            messages=encode_conversation(conversation),
-            tools=request_tools,
-            extra_body=deepcopy(self._extra_body),
-        ) as sdk_stream:
+        request: dict[str, object] = {
+            "model": self._model,
+            "max_tokens": self._max_tokens,
+            "messages": encode_conversation(conversation),
+            "tools": request_tools,
+            "extra_body": deepcopy(self._extra_body),
+        }
+        if system_instructions:
+            request["system"] = system_instructions
+        async with self._client.messages.stream(**request) as sdk_stream:
             async for sdk_event in sdk_stream:
                 raw = cast(dict[str, object], sdk_event.model_dump(mode="json"))
                 for event in aggregator.consume(raw):

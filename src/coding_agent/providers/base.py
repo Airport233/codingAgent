@@ -47,4 +47,5 @@ class Provider(Protocol):
         self,
         conversation: tuple[ConversationExchange, ...],
         tools: tuple[ToolSpec, ...],
+        system_instructions: str | None = None,
     ) -> AsyncIterator[ProviderEvent]: ...

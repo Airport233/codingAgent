@@ -11,6 +11,7 @@ class FakeProvider:
     def __init__(self, responses: Sequence[AssistantExchange]) -> None:
         self._responses = list(responses)
         self.requests: list[tuple[ConversationExchange, ...]] = []
+        self.system_instructions: list[str] = []
 
     @property
     def request_count(self) -> int:
@@ -20,9 +21,11 @@ class FakeProvider:
         self,
         conversation: tuple[ConversationExchange, ...],
         tools: tuple[ToolSpec, ...],
+        system_instructions: str | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         del tools
         self.requests.append(conversation)
+        self.system_instructions.append(system_instructions or "")
         if not self._responses:
             raise RuntimeError("FakeProvider has no scripted response")
         response = self._responses.pop(0)
