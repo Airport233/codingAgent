@@ -115,7 +115,7 @@ memory ────────────┘ supplies instruction snapshots
 - `ContextBudget`：模型窗口、输出预留、软阈值和硬阈值；
 - `CompactionPlanner`：选择可压缩范围与保留尾部；
 - `SummarizingCompactor`：调用当前 Provider 生成结构化摘要；
-- `TruncatingCompactor`：摘要失败时的确定性兜底；
+- `TruncatingCompactor`：与模型摘要相互独立的确定性兜底，产物必须单独校验和持久化；
 - `ContextProjector`：从原始历史生成当前有效请求上下文。
 
 ### 4.6 Session Store
@@ -434,10 +434,15 @@ sequenceDiagram
         Store-->>Ctx: durable
         Ctx-->>Loop: install checkpoint
     else summary/provider failure
-        Ctx->>Ctx: build deterministic fallback
-        Ctx->>Store: append fallback checkpoint or failure
-        Store-->>Ctx: durable/failure
-        Ctx-->>Loop: install only after durable success
+        Ctx->>Store: append strategy failure
+        Ctx->>Ctx: independently build and validate deterministic fallback
+        alt fallback valid and durable
+            Ctx->>Store: append fallback checkpoint
+            Store-->>Ctx: durable
+            Ctx-->>Loop: atomically install fallback checkpoint
+        else fallback invalid or storage failure
+            Ctx-->>Loop: retain original context and warn
+        end
     end
 ```
 

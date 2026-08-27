@@ -41,7 +41,10 @@
 - uv lockfile、Ruff、Pyright、pytest-cov；
 - Windows/macOS GitHub Actions；
 - 可安装的 `coding-agent --help`；
-- 空项目也必须通过覆盖率与 smoke test 配置验证。
+- 覆盖 API key、用户配置、会话和日志的 `.gitignore`；
+- 仅使用虚构端点与假密钥名称的 `config.example.toml`；
+- 本地与 CI 可执行的敏感信息扫描，从第一个代码分支开始阻止凭据入库；
+- 可安装的最小项目通过覆盖率与 smoke test 配置验证。
 
 ### M1：行走骨架
 
@@ -73,7 +76,7 @@
 
 ### M4：会话、恢复与记忆
 
-分支：`feature/sessions-memory`
+分支：`feature/sessions`，随后 `feature/memory`
 
 - JSONL 事件存储与版本化；
 - 异常中断恢复与末行损坏容错；
