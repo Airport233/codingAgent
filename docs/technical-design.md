@@ -203,6 +203,12 @@ max_output_bytes = 65536
 
 示例数字仅为格式说明，真实模型上限必须由用户配置或经官方文档确认，不能凭模型名称猜测。
 
+### 6.4 MCP Client 扩展预留
+
+MVP 不实现 MCP 传输，也不开放 MCP 端口。工具目录使用 `ToolSource` 抽象获取工具定义：首版只提供 `BuiltinToolSource`，未来可增加 `McpToolSource` 而不修改 AgentLoop 或 ToolDispatcher。
+
+未来首期优先支持本地 `stdio` MCP Server，由 codingAgent 启动并监督子进程。工具对模型暴露为 `mcp__<server>__<tool>`，并复用现有的校验、策略、取消、记录和脱敏链路。Streamable HTTP 以及 codingAgent 作为 MCP Server 均不在 MVP 范围。
+
 ## 7. CLI 技术方案
 
 ### 7.1 交互形态
@@ -344,11 +350,19 @@ expected_file_hash
 - `ruff format --check`；
 - `ruff check`；
 - `pyright`；
-- `pytest`。
+- `pytest` + `pytest-cov`，开启 branch coverage；
+- 总语句覆盖率门槛 85%；
+- 总分支覆盖率门槛 75%。
 
 测试不得需要真实 API key。
 
+覆盖率计算包含 `src/coding_agent`，排除测试代码、类型检查专用分支和生成文件。CI 应同时生成终端摘要和 XML 报告。不允许为了合并单个功能而临时降低门槛；如需调整，必须先修改需求和技术文档并说明原因。
+
+pytest-cov 负责收集 statement/branch 数据并输出 coverage JSON/XML；仓库内的小型检查脚本分别验证 85% 语句门槛和 75% 分支门槛，避免把两者合并成一个含义不清的总数。
+
 ## 13. TDD 与分支流程
+
+总体采用“薄纵切行走骨架 + 分层 TDD”：先写一个失败的端到端验收测试，打通 CLI/Application API、FakeProvider、最小 AgentLoop、一个工具和会话存储；随后在每个纵向功能中，从对外契约向内写单元测试并实现最小代码。不先单独造完所有底层组件，也不用大量 Mock 代替关键集成路径。
 
 每个主体模块使用独立短生命周期分支：
 
@@ -375,10 +389,12 @@ feature/cli
 
 `main` 应始终可安装、可启动且测试通过。并行分支只用于文件和依赖边界明确、不互相修改公共核心类型的模块。
 
+详细的纵切顺序、分支准入条件和里程碑见 `docs/implementation-plan.md`。
+
 ## 14. 参考项目使用原则
 
 - OpenCode 与 Codex 仅用于研究模块边界、事件模型、工具调度、压缩和存储思想。
-- 不复制与项目规模不相称的 Provider、插件、MCP、多 Agent 或沙箱体系。
+- 不复制与项目规模不相称的 Provider、插件、MCP、多 Agent 或沙箱体系；MCP 在 MVP 中仅保留工具来源扩展边界。
 - 引用具体实现时使用固定 commit 链接，并检查许可证。
 - Anthropic 协议字段以 Anthropic/百炼官方文档、SDK 源码和 Provider 探测结果为准。
 
