@@ -1,0 +1,8 @@
+[general]
+default_model = "example/example-model"
+
+[providers.example]
+protocol = "anthropic-messages"
+base_url = "https://example.invalid/anthropic"
+api_key_env = "CODING_AGENT_EXAMPLE_API_KEY"
+models = ["example-model"]
