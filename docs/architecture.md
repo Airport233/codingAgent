@@ -101,7 +101,7 @@ memory ────────────┘ supplies instruction snapshots
 
 组件：
 
-- `ToolRegistry`：注册工具、导出 schema、声明风险和并发能力；
+- `ToolCatalog`：从一个或多个 `ToolSource` 收集工具、检测命名冲突并导出 schema；MVP 只注册 `BuiltinToolSource`；
 - `ToolRouter`：按名称查找工具并使用 Pydantic 校验参数；
 - `ToolDispatcher`：策略判断、未来审批、串行准入、执行、取消及事件通知；
 - `ToolHandler`：具体工具实现；
@@ -294,7 +294,20 @@ stateDiagram-v2
 
 ## 8. 工具架构
 
-### 8.1 Tool 接口
+### 8.1 ToolSource 与 Tool 接口
+
+```python
+class ToolSource(Protocol):
+    source_id: str
+
+    async def list_tools(self) -> Sequence[Tool]: ...
+```
+
+`ToolCatalog` 只依赖 `ToolSource`，对 AgentLoop 和 ToolDispatcher 提供统一的查找与 schema 导出接口。MVP 的 `BuiltinToolSource` 包含项目内置工具；未来的 `McpToolSource` 将外部 MCP Server 的工具转换为同一 `Tool` 契约。该边界不引入 MCP 依赖、守护进程或网络端口。
+
+外部工具未来使用 `mcp__<server>__<tool>` 命名空间，但仍必须经过 ToolDispatcher，不允许绕过策略、审批、取消、脱敏和会话记录。
+
+Tool 接口为：
 
 ```python
 class Tool(Protocol):
@@ -619,17 +632,15 @@ feature/memory ─────────────────────�
 feature/context ─────────────> feature/cli
 ```
 
+上图表示模块依赖关系，不表示必须先把底层模块全部实现完毕。实际交付以行走骨架开始，再按纵向切片逐步替换骨架中的 Fake 或最小实现。
+
 推荐顺序：
 
-1. 领域模型、FakeProvider 和事件接口；
-2. Provider 流聚合与 Provider 探测；
-3. JSONL Session Store；
-4. 最小 AgentLoop + `read_file` + `shell`；
-5. 搜索、写入、目录和编辑工具；
-6. 记忆加载；
-7. 上下文容量与压缩；
-8. CLI 完善；
-9. Windows/macOS 集成加固。
+1. 以失败的端到端测试定义行走骨架：最小 CLI/Application API、FakeProvider、AgentLoop、`read_file` 和内存会话；
+2. 让行走骨架通过，并在 Windows/macOS CI 持续运行；
+3. 按纵向切片实现 Provider 流聚合、内置工具、JSONL 会话/记忆、上下文压缩和 CLI 完善；
+4. 每个切片从验收/契约测试向内推进到单元测试，通过全部 CI 门禁后立即合入 `main`；
+5. 最后进行真实 Provider 契约探测和 Windows/macOS 集成加固。
 
 公共领域模型在早期固定后再并行开发。修改 `ContentBlock`、`Exchange`、`CoreEvent` 等公共契约必须先更新架构文档和契约测试，避免不同分支同时改变接口。
 
@@ -647,6 +658,8 @@ feature/context ─────────────> feature/cli
 | 压缩 | 本地摘要 + 确定性兜底 | 服务端托管压缩 | 满足题目且可测试 |
 | Shell | 平台 backend | 统一 Bash 假设 | Windows/macOS 双平台需求 |
 | 安全 | 路径/进程/脱敏 + 审批接口 | 首版 OS 沙箱 | 时间限制与跨平台复杂度 |
+| MCP | 仅保留 Client 端 ToolSource 扩展点 | MVP 实现传输或暴露 Server 端口 | 后续可接 CodeGraph/OpenCodeReview，不影响主体交付 |
+| 开发顺序 | 薄纵切行走骨架 + 分层 TDD | 纯自顶向/纯自底向 | 早验证主链路，同时保持模块可测 |
 
 ## 19. 架构完成标准
 
