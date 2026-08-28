@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from collections.abc import AsyncIterator, Iterator
 from io import StringIO
 from pathlib import Path
@@ -207,7 +208,10 @@ async def test_explicit_workspace_limits_tools_inside_a_parent_git_repository(
     assert continuation.results[0].content == "1: visible"
     assert continuation.results[1].is_error is True
     assert "does not exist" in continuation.results[1].content
-    expected_project_key = hashlib.sha256(str(workspace.resolve()).encode()).hexdigest()[:24]
+    normalized_workspace = str(workspace.resolve())
+    if os.name == "nt":
+        normalized_workspace = normalized_workspace.casefold()
+    expected_project_key = hashlib.sha256(normalized_workspace.encode()).hexdigest()[:24]
     session_file = next((tmp_path / "data" / "sessions").rglob("*.jsonl"))
     assert session_file.parent.name == expected_project_key
 
