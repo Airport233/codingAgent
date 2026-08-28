@@ -57,7 +57,27 @@ async def run_repl(
         if prompt == "/exit":
             return
         if prompt == "/help":
-            write_output("Commands: /help, /exit")
+            write_output("Commands: /help, /context, /compact, /exit")
+            continue
+        if prompt == "/context":
+            status = application.context_status()
+            if status is None:
+                write_output("Context management is unavailable.\n")
+            else:
+                write_output(
+                    f"Context: {status.used_tokens}/{status.context_window} tokens "
+                    f"({status.level}); auto={status.soft_limit}, hard={status.hard_limit}\n"
+                )
+            continue
+        if prompt == "/compact":
+            checkpoint = await application.compact_context()
+            if checkpoint is None:
+                write_output("Context is too short to compact.\n")
+            else:
+                write_output(
+                    f"Compacted context: {checkpoint.before_tokens} -> "
+                    f"{checkpoint.after_tokens} tokens.\n"
+                )
             continue
         async for event in application.run(prompt):
             if isinstance(event, TextDelta):

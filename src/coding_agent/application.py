@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Sequence
 
+from coding_agent.context import CompactionCheckpoint, ContextManager, ContextStatus
 from coding_agent.domain import (
     AssistantExchange,
     Conversation,
@@ -34,6 +35,7 @@ class AgentApplication:
         max_steps: int = 20,
         memory_loader: ProjectMemoryLoader | None = None,
         initial_exchanges: Sequence[ConversationExchange] = (),
+        context_manager: ContextManager | None = None,
     ) -> None:
         self._provider = provider
         self._dispatcher = dispatcher
@@ -42,6 +44,21 @@ class AgentApplication:
         self._memory_loader = memory_loader
         self._last_memory_digest: str | None = None
         self._conversation = Conversation(list(initial_exchanges))
+        self._context_manager = context_manager
+
+    def context_status(self) -> ContextStatus | None:
+        if self._context_manager is None:
+            return None
+        return self._context_manager.status(self._conversation.snapshot())
+
+    async def compact_context(self, reason: str = "manual") -> CompactionCheckpoint | None:
+        if self._context_manager is None:
+            return None
+        return await self._context_manager.compact(
+            self._conversation.snapshot(),
+            reason=reason,
+            persist=self._sessions.append,
+        )
 
     async def run(self, prompt: str) -> AsyncIterator[CoreEvent]:
         user_exchange = UserExchange(content=prompt)
@@ -71,8 +88,15 @@ class AgentApplication:
                         },
                     )
                     self._last_memory_digest = memory.digest
+            if self._context_manager is not None:
+                status = self._context_manager.status(self._conversation.snapshot())
+                if status.level in {"soft", "hard"}:
+                    await self.compact_context(reason="auto")
+                request_history = self._context_manager.project(self._conversation.snapshot())
+            else:
+                request_history = self._conversation.snapshot()
             async for event in self._provider.stream(
-                self._conversation.snapshot(),
+                request_history,
                 self._dispatcher.catalog.specs,
                 system_instructions,
             ):

@@ -114,7 +114,7 @@ async def test_repl_accepts_multiple_turns_and_exits_without_provider_work(tmp_p
         ]
     )
     runtime = await create_runtime(settings, provider=provider)
-    inputs: Iterator[str] = iter(("question one", "question two", "/exit"))
+    inputs: Iterator[str] = iter(("question one", "question two", "/context", "/compact", "/exit"))
     output: list[str] = []
 
     async def read_input() -> str:
@@ -126,6 +126,8 @@ async def test_repl_accepts_multiple_turns_and_exits_without_provider_work(tmp_p
     assert provider.request_count == 2
     assert "answer one" in "".join(output)
     assert "answer two" in "".join(output)
+    assert "Context:" in "".join(output)
+    assert "too short to compact" in "".join(output)
 
 
 def test_console_output_does_not_treat_model_text_as_rich_markup() -> None:
