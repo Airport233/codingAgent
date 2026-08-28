@@ -29,7 +29,7 @@ from coding_agent.runtime import (
     create_runtime,
 )
 from coding_agent.sessions.jsonl import JsonlSessionRepository, SessionSummary
-from coding_agent.tui import CliTransition, CodingAgentTui
+from coding_agent.tui import CliTransition, CodingAgentTui, format_slash_help
 
 type TransitionCallback = Callable[[str | None], Awaitable[CliTransition]]
 
@@ -95,10 +95,7 @@ async def run_repl(
             await application.close_session()
             return
         if prompt == "/help":
-            write_output(
-                "Commands: /help, /model [provider/model], /context, /compact, "
-                "/thinking, /resume, /clear, /exit\n"
-            )
+            write_output(format_slash_help() + "\n")
             continue
         if prompt == "/model":
             choices = ", ".join(available_models) or model

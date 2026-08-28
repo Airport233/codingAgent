@@ -68,11 +68,12 @@ ResumeCallback = Callable[[str], Awaitable[CliTransition]]
 class SlashCommand:
     name: str
     description: str
+    arguments: str = ""
 
 
 SLASH_COMMANDS = (
     SlashCommand("help", "Show available commands"),
-    SlashCommand("model", "Choose a model"),
+    SlashCommand("model", "Show or choose a model", "[provider/model]"),
     SlashCommand("context", "Show context usage"),
     SlashCommand("compact", "Compact conversation context"),
     SlashCommand("thinking", "Toggle thinking details"),
@@ -80,6 +81,20 @@ SLASH_COMMANDS = (
     SlashCommand("clear", "Start a new empty session"),
     SlashCommand("exit", "Exit codingAgent"),
 )
+
+
+def format_slash_help() -> str:
+    usages = [
+        f"/{command.name}{f' {command.arguments}' if command.arguments else ''}"
+        for command in SLASH_COMMANDS
+    ]
+    width = max(map(len, usages))
+    lines = ["Commands:"]
+    lines.extend(
+        f"  {usage:<{width}}  {command.description}"
+        for usage, command in zip(usages, SLASH_COMMANDS, strict=True)
+    )
+    return "\n".join(lines)
 
 
 class PromptTextArea(TextArea):
@@ -590,10 +605,7 @@ class CodingAgentTui(App[None]):
 
     async def _command(self, prompt: str) -> None:
         if prompt == "/help":
-            await self._notice(
-                "/model [provider/model]  /context  /compact  /thinking  /resume  /clear  /exit",
-                "info",
-            )
+            await self._notice(format_slash_help(), "info")
         elif prompt == "/model":
             choices = ", ".join(self.available_models) or self.model
             await self._notice(f"Model: {self.model}\nAvailable: {choices}", "info")

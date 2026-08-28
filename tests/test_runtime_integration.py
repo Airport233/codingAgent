@@ -597,7 +597,9 @@ async def test_repl_reports_unavailable_commands_and_toggles_thinking_off() -> N
     )
 
     rendered = "".join(output)
-    assert "Commands: /help" in rendered
+    assert "Commands:\n  /help" in rendered
+    assert "/model [provider/model]  Show or choose a model" in rendered
+    assert "/resume                  Resume a saved session" in rendered
     assert "Model: current/model; available: current/model" in rendered
     assert "Model switching is unavailable." in rendered
     assert "Starting a new session is unavailable." in rendered

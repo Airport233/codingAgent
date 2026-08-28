@@ -35,9 +35,24 @@ from coding_agent.tui import (
     CompactionProgress,
     PromptTextArea,
     ResumeSessionScreen,
+    format_slash_help,
 )
 
 pytestmark = pytest.mark.asyncio
+
+
+async def test_slash_help_uses_one_aligned_command_per_line() -> None:
+    assert format_slash_help().splitlines() == [
+        "Commands:",
+        "  /help                    Show available commands",
+        "  /model [provider/model]  Show or choose a model",
+        "  /context                 Show context usage",
+        "  /compact                 Compact conversation context",
+        "  /thinking                Toggle thinking details",
+        "  /resume                  Resume a saved session",
+        "  /clear                   Start a new empty session",
+        "  /exit                    Exit codingAgent",
+    ]
 
 
 def application_with_response(text: str = "Finished successfully.") -> AgentApplication:
