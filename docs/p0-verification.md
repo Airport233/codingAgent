@@ -25,11 +25,13 @@ repository-wide quality command is the GitHub Actions `CI` workflow on macOS and
 
 ## Manual acceptance
 
-On 2026-08-28, the CLI completed the isolated failing-discount task on macOS with the configured
-Anthropic-compatible Provider. It inspected the project, recovered from an initial edit conflict,
-fixed only `calculator.py`, and made all three scenario tests pass. `/context`, `/compact`, and
-`/exit` were exercised in the same session. The tracked failing fixture was then restored so the
-scenario remains repeatable.
+On 2026-08-28, an initial live run with the configured Anthropic-compatible Provider completed the
+failing-discount task, but it also exposed that a nested `--workspace` was incorrectly widened to
+its parent Git repository. That run does not count as an isolated acceptance result. The workspace
+boundary and session identity were corrected and covered by a cross-platform regression test. A
+post-fix live rerun was blocked before inference by the gateway reporting that the configured model
+identifier was invalid, so the isolated live acceptance below remains pending. The tracked failing
+fixture was restored and still fails its percentage-discount test as intended.
 
 Use an isolated copy for subsequent runs:
 
