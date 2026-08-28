@@ -149,8 +149,14 @@ class EditFileTool:
 
         self._writer.write(target, updated_raw, validate_before_replace=validate)
         self._read_set.refresh_after_write(target, updated_raw)
+        before_preview = _preview(selected)
+        after_preview = _preview("\n".join(replacement_lines))
         return ToolOutput(
-            content=f"Updated {parsed.path} lines {parsed.start_line}-{parsed.end_line}"
+            content=(
+                f"Updated {parsed.path} lines {parsed.start_line}-{parsed.end_line}\n"
+                f"before: {before_preview}\n"
+                f"after: {after_preview}"
+            )
         )
 
 
@@ -165,3 +171,10 @@ def _detect_newline(content: str) -> str:
 
 def _has_terminal_newline(content: str) -> bool:
     return content.endswith(("\r\n", "\n", "\r"))
+
+
+def _preview(content: str, limit: int = 500) -> str:
+    compact = "\\n".join(content.splitlines())
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[:limit]}...[truncated]"

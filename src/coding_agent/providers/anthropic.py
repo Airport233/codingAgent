@@ -29,11 +29,13 @@ class AnthropicMessagesProvider:
         model: str,
         max_tokens: int,
         extra_body: dict[str, object] | None = None,
+        supports_tools: bool = True,
     ) -> None:
         self._client = client
         self._model = model
         self._max_tokens = max_tokens
         self._extra_body = deepcopy(extra_body or {})
+        self._supports_tools = supports_tools
 
     async def stream(
         self,
@@ -54,9 +56,10 @@ class AnthropicMessagesProvider:
             "model": self._model,
             "max_tokens": self._max_tokens,
             "messages": encode_conversation(conversation),
-            "tools": request_tools,
             "extra_body": deepcopy(self._extra_body),
         }
+        if self._supports_tools:
+            request["tools"] = request_tools
         if system_instructions:
             request["system"] = system_instructions
         async with self._client.messages.stream(**request) as sdk_stream:

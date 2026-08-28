@@ -2,8 +2,14 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
 
-from coding_agent.domain import AssistantExchange, ConversationExchange, TextBlock
-from coding_agent.providers.base import ProviderEvent, ProviderResponseFinished, ProviderTextDelta
+from coding_agent.domain import AssistantExchange, ConversationExchange, TextBlock, ThinkingBlock
+from coding_agent.providers.base import (
+    ProviderEvent,
+    ProviderResponseFinished,
+    ProviderTextDelta,
+    ProviderThinkingDelta,
+    ProviderThinkingSignatureDelta,
+)
 from coding_agent.tools.base import ToolSpec
 
 
@@ -32,4 +38,8 @@ class FakeProvider:
         for block in response.blocks:
             if isinstance(block, TextBlock):
                 yield ProviderTextDelta(text=block.text)
+            elif isinstance(block, ThinkingBlock):
+                yield ProviderThinkingDelta(thinking=block.thinking)
+                if block.signature is not None:
+                    yield ProviderThinkingSignatureDelta(signature=block.signature)
         yield ProviderResponseFinished(exchange=response)

@@ -148,9 +148,11 @@ async def test_provider_ignores_sdk_convenience_events_between_raw_events() -> N
         client=client,
         model="example-model",
         max_tokens=128,
+        supports_tools=False,
     )
 
     events = [event async for event in provider.stream((UserExchange("hello"),), ())]
 
     assert events.count(ProviderTextDelta(text="hello")) == 1
     assert isinstance(events[-1], ProviderResponseFinished)
+    assert "tools" not in client.messages.calls[0]

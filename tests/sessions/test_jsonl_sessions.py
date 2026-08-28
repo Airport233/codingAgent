@@ -118,6 +118,22 @@ async def test_resume_latest_is_scoped_to_the_current_project(
 
 
 @pytest.mark.asyncio
+async def test_starting_a_new_session_preserves_the_closed_session_file(
+    roots: tuple[Path, Path, Path],
+) -> None:
+    data_root, project, _ = roots
+    repository = JsonlSessionRepository(data_root)
+    previous = await repository.create(project, session_id="previous")
+    await previous.append("session_closed", {})
+
+    current = await repository.create(project, session_id="current")
+
+    assert previous.events_path.is_file()
+    assert current.events_path.is_file()
+    assert previous.events_path != current.events_path
+
+
+@pytest.mark.asyncio
 async def test_incomplete_final_json_line_is_skipped_with_a_warning(
     roots: tuple[Path, Path, Path],
 ) -> None:

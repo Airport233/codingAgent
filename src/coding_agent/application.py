@@ -2,28 +2,41 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 
 from coding_agent.context import CompactionCheckpoint, ContextManager, ContextStatus
 from coding_agent.domain import (
     AssistantExchange,
     Conversation,
     ConversationExchange,
+    RedactedThinkingBlock,
+    ThinkingBlock,
     ToolContinuationExchange,
+    ToolResultBlock,
     UserExchange,
 )
 from coding_agent.events import (
+    AgentCancelled,
     AgentCompleted,
     AgentFailed,
     AgentStarted,
+    ContextUsageChanged,
     CoreEvent,
     TextDelta,
+    ThinkingDelta,
+    ThinkingFinished,
+    ThinkingStarted,
     ToolFinished,
     ToolStarted,
     WarningRaised,
 )
 from coding_agent.memory.loader import ProjectMemoryLoader
-from coding_agent.providers.base import Provider, ProviderResponseFinished, ProviderTextDelta
+from coding_agent.providers.base import (
+    Provider,
+    ProviderResponseFinished,
+    ProviderTextDelta,
+    ProviderThinkingDelta,
+)
 from coding_agent.sessions.base import SessionStore
 from coding_agent.tools.dispatcher import ToolDispatcher
 
@@ -39,6 +52,7 @@ class AgentApplication:
         initial_exchanges: Sequence[ConversationExchange] = (),
         context_manager: ContextManager | None = None,
         context_reprojected: bool = False,
+        display_redactor: Callable[[object], object] | None = None,
     ) -> None:
         self._provider = provider
         self._dispatcher = dispatcher
@@ -49,6 +63,14 @@ class AgentApplication:
         self._conversation = Conversation(list(initial_exchanges))
         self._context_manager = context_manager
         self._context_reprojected = context_reprojected
+        self._display_redactor = display_redactor or (lambda value: value)
+        self._closed = False
+
+    async def close_session(self) -> None:
+        if self._closed:
+            return
+        await self._sessions.append("session_closed", {})
+        self._closed = True
 
     def context_status(self) -> ContextStatus | None:
         if self._context_manager is None:
@@ -155,28 +177,65 @@ class AgentApplication:
                             "Context compaction failed; continuing with the original context"
                         )
                 request_history = self._context_manager.project(self._conversation.snapshot())
-                if (
-                    self._context_manager.status(
-                        self._conversation.snapshot(), supplemental_characters
-                    ).level
-                    == "hard"
-                ):
-                    yield AgentFailed(message="Context remains above the safe request limit")
+                status = self._context_manager.status(
+                    self._conversation.snapshot(), supplemental_characters
+                )
+                yield ContextUsageChanged(
+                    used_tokens=status.used_tokens,
+                    context_window=status.context_window,
+                    level=status.level,
+                )
+                if status.level == "hard":
+                    message = "Context remains above the safe request limit"
+                    await self._sessions.append("turn_failed", {"message": message})
+                    yield AgentFailed(message=message)
                     return
             else:
                 request_history = self._conversation.snapshot()
-            async for event in self._provider.stream(
-                request_history,
-                self._dispatcher.catalog.specs,
-                system_instructions,
+            thinking_active = False
+            try:
+                async for event in self._provider.stream(
+                    request_history,
+                    self._dispatcher.catalog.specs,
+                    system_instructions,
+                ):
+                    if isinstance(event, ProviderThinkingDelta):
+                        if not thinking_active:
+                            thinking_active = True
+                            yield ThinkingStarted()
+                        yield ThinkingDelta(text=event.thinking)
+                    elif isinstance(event, ProviderTextDelta):
+                        if thinking_active:
+                            thinking_active = False
+                            yield ThinkingFinished()
+                        yield TextDelta(text=event.text)
+                    elif isinstance(event, ProviderResponseFinished):
+                        response = event.exchange
+            except asyncio.CancelledError:
+                await self._sessions.append("turn_cancelled", {"phase": "provider_request"})
+                yield AgentCancelled(message="Provider request cancelled")
+                return
+            except Exception as error:
+                message = self._redacted_text(error)
+                await self._sessions.append(
+                    "turn_failed", {"phase": "provider_request", "message": message}
+                )
+                yield AgentFailed(message=f"Provider request failed: {message}")
+                return
+
+            if thinking_active:
+                yield ThinkingFinished()
+            elif response is not None and any(
+                isinstance(block, (ThinkingBlock, RedactedThinkingBlock))
+                for block in response.blocks
             ):
-                if isinstance(event, ProviderTextDelta):
-                    yield TextDelta(text=event.text)
-                elif isinstance(event, ProviderResponseFinished):
-                    response = event.exchange
+                yield ThinkingStarted()
+                yield ThinkingFinished()
 
             if response is None:
-                yield AgentFailed(message="Provider response ended without a completed exchange")
+                message = "Provider response ended without a completed exchange"
+                await self._sessions.append("turn_failed", {"message": message})
+                yield AgentFailed(message=message)
                 return
 
             await self._sessions.append("assistant_exchange", response)
@@ -187,8 +246,8 @@ class AgentApplication:
                     self._supplemental_characters(system_instructions),
                 )
             if response.tool_uses:
-                results = []
-                for call in response.tool_uses:
+                results: list[ToolResultBlock] = []
+                for call_index, call in enumerate(response.tool_uses):
                     await self._sessions.append(
                         "tool_started",
                         {
@@ -197,7 +256,11 @@ class AgentApplication:
                             "input": call.input,
                         },
                     )
-                    yield ToolStarted(call_id=call.call_id, tool_name=call.name)
+                    yield ToolStarted(
+                        call_id=call.call_id,
+                        tool_name=call.name,
+                        arguments=self._redacted_mapping(call.input),
+                    )
                     try:
                         result = await self._dispatcher.execute(call)
                     except asyncio.CancelledError:
@@ -205,8 +268,43 @@ class AgentApplication:
                             "tool_cancelled",
                             {"call_id": call.call_id, "tool_name": call.name},
                         )
+                        results.append(
+                            ToolResultBlock(
+                                call.call_id,
+                                "cancelled_by_user",
+                                True,
+                                {"cancelled": True},
+                            )
+                        )
+                        for remaining in response.tool_uses[call_index + 1 :]:
+                            results.append(
+                                ToolResultBlock(
+                                    remaining.call_id,
+                                    "cancelled_before_execution",
+                                    True,
+                                    {"cancelled": True},
+                                )
+                            )
+                        continuation = ToolContinuationExchange(response, tuple(results))
+                        self._conversation.exchanges.append(continuation)
+                        await self._sessions.append("tool_continuation", continuation)
                         await self._sessions.append("turn_cancelled", {"phase": "tool_execution"})
-                        raise
+                        yield ToolFinished(
+                            call_id=call.call_id,
+                            tool_name=call.name,
+                            is_error=True,
+                            content="cancelled_by_user",
+                            metadata={"cancelled": True},
+                        )
+                        yield AgentCancelled(message="Tool execution cancelled")
+                        return
+                    except Exception as error:
+                        result = ToolResultBlock(
+                            call.call_id,
+                            self._redacted_text(error),
+                            True,
+                            {"unexpected_error": True},
+                        )
                     results.append(result)
                     await self._sessions.append(
                         "tool_finished",
@@ -222,6 +320,8 @@ class AgentApplication:
                         call_id=call.call_id,
                         tool_name=call.name,
                         is_error=result.is_error,
+                        content=self._redacted_text(result.content),
+                        metadata=self._redacted_mapping(result.metadata),
                     )
                 continuation = ToolContinuationExchange(
                     assistant=response,
@@ -233,9 +333,24 @@ class AgentApplication:
 
             self._conversation.exchanges.append(response)
             if response.stop_reason == "end_turn":
+                await self._sessions.append("turn_completed", {})
                 yield AgentCompleted(text=response.text)
                 return
-            yield AgentFailed(message=f"Provider stopped with reason: {response.stop_reason}")
+            message = f"Provider stopped with reason: {response.stop_reason}"
+            await self._sessions.append("turn_failed", {"message": message})
+            yield AgentFailed(message=message)
             return
 
-        yield AgentFailed(message="Maximum agent steps reached")
+        message = "Maximum agent steps reached"
+        await self._sessions.append("turn_failed", {"message": message})
+        yield AgentFailed(message=message)
+
+    def _redacted_text(self, value: object) -> str:
+        redacted = self._display_redactor(str(value))
+        return redacted if isinstance(redacted, str) else "[unavailable]"
+
+    def _redacted_mapping(self, value: object) -> dict[str, object]:
+        redacted = self._display_redactor(value)
+        if not isinstance(redacted, dict):
+            return {}
+        return {str(key): child for key, child in redacted.items()}

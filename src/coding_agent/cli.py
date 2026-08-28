@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
@@ -11,14 +12,35 @@ from rich.console import Console
 
 from coding_agent.application import AgentApplication
 from coding_agent.events import (
+    AgentCancelled,
     AgentCompleted,
     AgentFailed,
+    ContextUsageChanged,
     TextDelta,
+    ThinkingDelta,
+    ThinkingFinished,
+    ThinkingStarted,
     ToolFinished,
     ToolStarted,
     WarningRaised,
 )
-from coding_agent.runtime import RuntimeConfigurationError, RuntimeSettings, create_runtime
+from coding_agent.runtime import (
+    AgentRuntime,
+    RuntimeConfigurationError,
+    RuntimeSettings,
+    create_runtime,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CliTransition:
+    application: AgentApplication
+    model: str
+    session_id: str
+    available_models: tuple[str, ...]
+
+
+type TransitionCallback = Callable[[str | None], Awaitable[CliTransition]]
 
 app = typer.Typer(
     add_completion=False,
@@ -67,15 +89,68 @@ async def run_repl(
     *,
     read_input: Callable[[], Awaitable[str]],
     write_output: Callable[[str], None],
+    model: str = "unknown",
+    session_id: str = "unknown",
+    available_models: tuple[str, ...] = (),
+    switch_model: TransitionCallback | None = None,
+    clear_session: TransitionCallback | None = None,
 ) -> None:
+    thinking_visible = False
     while True:
         prompt = (await read_input()).strip()
         if not prompt:
             continue
         if prompt == "/exit":
+            await application.close_session()
             return
         if prompt == "/help":
-            write_output("Commands: /help, /context, /compact, /exit")
+            write_output(
+                "Commands: /help, /model [provider/model], /context, /compact, "
+                "/thinking, /clear, /exit\n"
+            )
+            continue
+        if prompt == "/model":
+            choices = ", ".join(available_models) or model
+            write_output(f"Model: {model}; available: {choices}\n")
+            continue
+        if prompt.startswith("/model "):
+            target = prompt.removeprefix("/model ").strip()
+            if not target or switch_model is None:
+                write_output("Model switching is unavailable.\n")
+                continue
+            try:
+                transition = await switch_model(target)
+            except RuntimeConfigurationError as error:
+                write_output(f"[error] Model switch failed: {error}\n")
+                continue
+            except Exception:
+                write_output("[error] Model switch failed.\n")
+                continue
+            application = transition.application
+            model = transition.model
+            session_id = transition.session_id
+            available_models = transition.available_models
+            write_output(f"Model switched to {model}; session={session_id}.\n")
+            continue
+        if prompt == "/clear":
+            if clear_session is None:
+                write_output("Starting a new session is unavailable.\n")
+                continue
+            try:
+                transition = await clear_session(None)
+            except Exception:
+                write_output("[error] Unable to start a new session.\n")
+                continue
+            application = transition.application
+            model = transition.model
+            session_id = transition.session_id
+            available_models = transition.available_models
+            write_output(f"Started a new empty session: {session_id}.\n")
+            continue
+        if prompt == "/thinking":
+            thinking_visible = not thinking_visible
+            state = "shown" if thinking_visible else "hidden"
+            write_output(f"Thinking details: {state}.\n")
             continue
         if prompt == "/context":
             status = application.context_status()
@@ -108,20 +183,73 @@ async def run_repl(
                     f"{checkpoint.after_tokens} tokens.\n"
                 )
             continue
+        if prompt.startswith("/"):
+            write_output(f"Unknown command: {prompt.split(maxsplit=1)[0]}. Use /help.\n")
+            continue
         async for event in application.run(prompt):
             if isinstance(event, TextDelta):
                 write_output(event.text)
+            elif isinstance(event, ThinkingStarted):
+                if thinking_visible:
+                    write_output("\n[thinking] ")
+                else:
+                    write_output("\n[thinking] working...\n")
+            elif isinstance(event, ThinkingDelta):
+                if thinking_visible:
+                    write_output(event.text)
+            elif isinstance(event, ThinkingFinished):
+                if thinking_visible:
+                    write_output("\n[/thinking]\n")
+                else:
+                    write_output("[thinking] done\n")
+            elif isinstance(event, ContextUsageChanged):
+                if event.level != "safe":
+                    write_output(
+                        f"[context] {event.used_tokens}/{event.context_window} "
+                        f"tokens ({event.level})\n"
+                    )
             elif isinstance(event, ToolStarted):
-                write_output(f"\n[tool] {event.tool_name} started\n")
+                write_output(f"\n[tool] {_format_tool_call(event)}\n")
             elif isinstance(event, ToolFinished):
-                state = "error" if event.is_error else "done"
-                write_output(f"[tool] {event.tool_name} {state}\n")
+                write_output(f"[tool] {event.tool_name} {event.status}")
+                details = _format_tool_result(event)
+                if details:
+                    write_output(f"\n{details}")
+                write_output("\n")
             elif isinstance(event, AgentCompleted):
                 write_output("\n")
             elif isinstance(event, AgentFailed):
                 write_output(f"\n[error] {event.message}\n")
+            elif isinstance(event, AgentCancelled):
+                write_output(f"\n[cancelled] {event.message}\n")
             elif isinstance(event, WarningRaised):
                 write_output(f"\n[warning] {event.message}\n")
+
+
+def _format_tool_call(event: ToolStarted) -> str:
+    if event.tool_name == "shell":
+        command = event.arguments.get("command")
+        return f"shell $ {command}" if isinstance(command, str) else "shell"
+    path = event.arguments.get("path")
+    if isinstance(path, str):
+        if event.tool_name == "edit_file":
+            start = event.arguments.get("start_line")
+            end = event.arguments.get("end_line")
+            return f"edit_file {path}:{start}-{end}"
+        return f"{event.tool_name} {path}"
+    query = event.arguments.get("query")
+    if isinstance(query, str):
+        return f'{event.tool_name} "{query}"'
+    return event.tool_name
+
+
+def _format_tool_result(event: ToolFinished, limit: int = 4_000) -> str:
+    content = event.content.strip()
+    if not content:
+        return ""
+    if len(content) <= limit:
+        return content
+    return f"{content[:limit]}\n[output truncated for display]"
 
 
 def write_console(console: Console, value: str) -> None:
@@ -135,7 +263,36 @@ async def _run_cli(
     prompt: str | None,
 ) -> None:
     console = Console()
-    async with await create_runtime(settings, resume=resume) as runtime:
+    runtime = await create_runtime(settings, resume=resume)
+    current_settings = settings
+
+    async def switch_model(target: str | None) -> CliTransition:
+        nonlocal runtime, current_settings
+        if target is None:
+            raise RuntimeConfigurationError("A model ID is required")
+        next_settings = RuntimeSettings.load(
+            workspace=current_settings.workspace,
+            model=target,
+            data_root=current_settings.data_root,
+            max_tokens=current_settings.max_tokens_override,
+            max_steps=current_settings.max_steps_override,
+            context_window=current_settings.context_window_override,
+            auto_compact_ratio=current_settings.auto_compact_ratio_override,
+        )
+        next_runtime = await create_runtime(next_settings, resume=True)
+        await runtime.aclose()
+        runtime = next_runtime
+        current_settings = next_settings
+        return _transition(runtime, current_settings)
+
+    async def clear_session(_unused: str | None) -> CliTransition:
+        nonlocal runtime
+        await runtime.application.close_session()
+        await runtime.aclose()
+        runtime = await create_runtime(current_settings)
+        return _transition(runtime, current_settings)
+
+    try:
         if prompt is not None:
             prompts = iter((prompt, "/exit"))
 
@@ -146,6 +303,11 @@ async def _run_cli(
                 runtime.application,
                 read_input=read_once,
                 write_output=lambda value: write_console(console, value),
+                model=settings.model_key,
+                session_id=runtime.session_id,
+                available_models=settings.available_models,
+                switch_model=switch_model,
+                clear_session=clear_session,
             )
             return
 
@@ -154,15 +316,43 @@ async def _run_cli(
         async def read_interactive() -> str:
             return await session.prompt_async("coding-agent> ")
 
-        console.print(
-            f"codingAgent | model={settings.model} | workspace={settings.workspace} | "
-            f"session={runtime.session_id}"
-        )
+        console.print(_status_line(current_settings, runtime.application, runtime.session_id))
         await run_repl(
             runtime.application,
             read_input=read_interactive,
             write_output=lambda value: write_console(console, value),
+            model=current_settings.model_key,
+            session_id=runtime.session_id,
+            available_models=current_settings.available_models,
+            switch_model=switch_model,
+            clear_session=clear_session,
         )
+    finally:
+        await runtime.aclose()
+
+
+def _transition(runtime: AgentRuntime, settings: RuntimeSettings) -> CliTransition:
+    return CliTransition(
+        runtime.application,
+        settings.model_key,
+        runtime.session_id,
+        settings.available_models,
+    )
+
+
+def _status_line(settings: RuntimeSettings, application: AgentApplication, session_id: str) -> str:
+    provider = settings.model_key.partition("/")[0] if "/" in settings.model_key else "default"
+    status = application.context_status()
+    context = (
+        f"{status.used_tokens}/{status.context_window} "
+        f"({status.used_tokens / status.context_window:.1%})"
+        if status is not None
+        else "unavailable"
+    )
+    return (
+        f"codingAgent | provider={provider} | model={settings.model} | "
+        f"workspace={settings.workspace} | context={context} | session={session_id}"
+    )
 
 
 def main() -> None:

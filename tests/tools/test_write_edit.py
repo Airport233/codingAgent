@@ -101,6 +101,8 @@ async def test_edit_replaces_inclusive_lines_and_preserves_crlf(workspace: Path)
 
     assert target.read_bytes() == b"one\r\nsecond\r\nthird\r\n"
     assert "lines 2-3" in result.content
+    assert "before: two\\nthree" in result.content
+    assert "after: second\\nthird" in result.content
 
 
 @pytest.mark.asyncio
