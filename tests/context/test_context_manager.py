@@ -9,7 +9,9 @@ from coding_agent.context import ContextBudget, ContextManager, TokenEstimator
 from coding_agent.domain import (
     AssistantExchange,
     ConversationExchange,
+    RedactedThinkingBlock,
     TextBlock,
+    ThinkingBlock,
     ToolContinuationExchange,
     ToolResultBlock,
     ToolUseBlock,
@@ -62,6 +64,46 @@ def test_provider_usage_calibrates_future_estimates_without_claiming_exact_statu
     assert status.used_tokens > before
     assert status.usage_source == "estimated"
     assert status.last_provider_input_tokens == 20
+
+
+def test_model_change_projection_removes_thinking_without_mutating_raw_history() -> None:
+    tool_assistant = AssistantExchange(
+        (
+            ThinkingBlock("private tool reasoning", signature="signed"),
+            ToolUseBlock("call-1", "read_file", {"path": "a.py"}),
+        ),
+        "tool_use",
+    )
+    history = (
+        UserExchange("inspect the file"),
+        AssistantExchange(
+            (
+                ThinkingBlock("private reasoning", signature="signed"),
+                RedactedThinkingBlock("opaque"),
+                TextBlock("public answer"),
+            ),
+            "end_turn",
+        ),
+        ToolContinuationExchange(
+            tool_assistant,
+            (ToolResultBlock("call-1", "contents", False),),
+        ),
+    )
+    manager = ContextManager(
+        ContextBudget(context_window=1_000, max_output_tokens=100),
+        TokenEstimator(),
+        excluded_thinking_indices=frozenset({1, 2}),
+    )
+
+    projected = manager.project(history)
+
+    assert history[1].blocks[0] == ThinkingBlock("private reasoning", signature="signed")
+    assistant = projected[1]
+    assert isinstance(assistant, AssistantExchange)
+    assert assistant.blocks == (TextBlock("public answer"),)
+    continuation = projected[2]
+    assert isinstance(continuation, ToolContinuationExchange)
+    assert continuation.assistant.blocks == (ToolUseBlock("call-1", "read_file", {"path": "a.py"}),)
 
 
 def test_deterministic_compaction_keeps_complete_recent_exchanges() -> None:
