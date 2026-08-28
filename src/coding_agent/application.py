@@ -20,6 +20,7 @@ from coding_agent.domain import (
     ThinkingBlock,
     ToolContinuationExchange,
     ToolResultBlock,
+    ToolUseBlock,
     UserExchange,
 )
 from coding_agent.events import (
@@ -40,6 +41,7 @@ from coding_agent.events import (
     WarningRaised,
 )
 from coding_agent.memory.loader import ProjectMemoryLoader
+from coding_agent.no_progress import NO_PROGRESS_WARNING, NoProgressDetector
 from coding_agent.plan import PlanState, PlanStep
 from coding_agent.providers.base import (
     Provider,
@@ -217,6 +219,8 @@ class AgentApplication:
             )
             self._context_reprojected = False
 
+        no_progress = NoProgressDetector()
+
         for _step in range(self._max_steps):
             response: AssistantExchange | None = None
             system_instructions = self._load_system_instructions(active_skill)
@@ -321,6 +325,7 @@ class AgentApplication:
                 )
             if response.tool_uses:
                 results: list[ToolResultBlock] = []
+                no_progress_failure: str | None = None
                 for call_index, call in enumerate(response.tool_uses):
                     approval = self._approval_policy.evaluate(call)
                     if approval == "ask":
@@ -385,6 +390,9 @@ class AgentApplication:
                             True,
                             {"denied": True},
                         )
+                        result, progress_warning, stop_message = await self._check_no_progress(
+                            no_progress, call, result
+                        )
                         results.append(result)
                         yield ToolStarted(
                             call_id=call.call_id,
@@ -408,6 +416,16 @@ class AgentApplication:
                             content=result.content,
                             metadata=result.metadata,
                         )
+                        if progress_warning is not None:
+                            yield progress_warning
+                        no_progress_failure = no_progress_failure or stop_message
+                        if stop_message is not None:
+                            results.extend(
+                                self._no_progress_skipped_results(
+                                    response.tool_uses[call_index + 1 :]
+                                )
+                            )
+                            break
                         continue
                     await self._sessions.append(
                         "tool_started",
@@ -466,6 +484,9 @@ class AgentApplication:
                             True,
                             {"unexpected_error": True},
                         )
+                    result, progress_warning, stop_message = await self._check_no_progress(
+                        no_progress, call, result
+                    )
                     results.append(result)
                     await self._sessions.append(
                         "tool_finished",
@@ -484,6 +505,9 @@ class AgentApplication:
                         content=self._redacted_text(result.content),
                         metadata=self._redacted_mapping(result.metadata),
                     )
+                    if progress_warning is not None:
+                        yield progress_warning
+                    no_progress_failure = no_progress_failure or stop_message
                     if call.name == "update_plan" and not result.is_error:
                         explanation = result.metadata.get("explanation", "")
                         explanation = explanation if isinstance(explanation, str) else ""
@@ -496,12 +520,21 @@ class AgentApplication:
                             },
                         )
                         yield PlanUpdated(steps, explanation)
+                    if stop_message is not None:
+                        results.extend(
+                            self._no_progress_skipped_results(response.tool_uses[call_index + 1 :])
+                        )
+                        break
                 continuation = ToolContinuationExchange(
                     assistant=response,
                     results=tuple(results),
                 )
                 self._conversation.exchanges.append(continuation)
                 await self._sessions.append("tool_continuation", continuation)
+                if no_progress_failure is not None:
+                    await self._sessions.append("turn_failed", {"message": no_progress_failure})
+                    yield AgentFailed(message=no_progress_failure)
+                    return
                 continue
 
             self._conversation.exchanges.append(response)
@@ -520,6 +553,57 @@ class AgentApplication:
         message = "Maximum agent steps reached"
         await self._sessions.append("turn_failed", {"message": message})
         yield AgentFailed(message=message)
+
+    async def _check_no_progress(
+        self,
+        detector: NoProgressDetector,
+        call: ToolUseBlock,
+        result: ToolResultBlock,
+    ) -> tuple[ToolResultBlock, WarningRaised | None, str | None]:
+        observation = detector.observe(call, result)
+        payload = {
+            "tool_name": call.name,
+            "fingerprint": observation.fingerprint,
+            "repetition_count": observation.repetition_count,
+        }
+        if observation.action == "warn":
+            await self._sessions.append("no_progress_warning", payload)
+            warned_result = ToolResultBlock(
+                result.tool_use_id,
+                result.content + NO_PROGRESS_WARNING,
+                result.is_error,
+                result.metadata,
+            )
+            return (
+                warned_result,
+                WarningRaised(
+                    "The same tool call produced the same result twice; "
+                    "the model was asked to change approach"
+                ),
+                None,
+            )
+        if observation.action == "stop":
+            await self._sessions.append("no_progress_stopped", payload)
+            message = (
+                "Stopped after the same tool call produced the same result "
+                f"{observation.repetition_count} times"
+            )
+            return result, None, message
+        return result, None, None
+
+    @staticmethod
+    def _no_progress_skipped_results(
+        calls: tuple[ToolUseBlock, ...],
+    ) -> tuple[ToolResultBlock, ...]:
+        return tuple(
+            ToolResultBlock(
+                call.call_id,
+                "skipped_after_no_progress_stop",
+                True,
+                {"skipped": True},
+            )
+            for call in calls
+        )
 
     def _context_usage_changed(self, system_instructions: str | None) -> ContextUsageChanged | None:
         if self._context_manager is None:
