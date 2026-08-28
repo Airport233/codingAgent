@@ -143,7 +143,13 @@ async def test_slash_popup_filters_navigates_completes_and_dismisses() -> None:
         assert choices.option_count == 2
         assert choices.get_option_at_index(0).id == "provider/model"
 
-        await pilot.press("down", "up", "tab")
+        await pilot.press("down")
+        await pilot.pause()
+        assert choices.highlighted == 1
+        await pilot.press("up")
+        await pilot.pause()
+        assert choices.highlighted == 0
+        await pilot.press("tab")
         await pilot.pause()
         assert composer.value == "/model provider/model"
 
@@ -172,6 +178,7 @@ async def test_slash_popup_handles_plain_completion_and_no_matches() -> None:
         composer.value = "/con"
         await pilot.pause()
         await pilot.press("tab")
+        await pilot.pause()
         assert composer.value == "/context"
         await pilot.press("enter")
         await pilot.pause()
@@ -183,6 +190,7 @@ async def test_slash_popup_handles_plain_completion_and_no_matches() -> None:
         assert choices.highlighted is None
         assert "No matches" in str(choices.get_option_at_index(0).prompt)
         await pilot.press("enter")
+        await pilot.pause()
         assert composer.value == "/does-not-exist"
 
         composer.value = "/context extra"
