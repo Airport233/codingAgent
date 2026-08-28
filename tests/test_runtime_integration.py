@@ -22,7 +22,7 @@ from coding_agent.domain import (
 from coding_agent.events import AgentFailed, WarningRaised
 from coding_agent.providers.base import ProviderEvent
 from coding_agent.providers.fake import FakeProvider
-from coding_agent.runtime import RuntimeSettings, create_runtime
+from coding_agent.runtime import RuntimeConfigurationError, RuntimeSettings, create_runtime
 from coding_agent.sessions.jsonl import Redactor
 from coding_agent.sessions.memory import InMemorySessionStore
 from coding_agent.tools.base import ToolOutput
@@ -556,6 +556,85 @@ async def test_repl_lists_and_switches_models_then_starts_a_new_session() -> Non
     assert selected_models == ["two/model"]
     assert switched_store.kinds == ["session_closed"]
     assert cleared_store.kinds == ["session_closed"]
+
+
+@pytest.mark.asyncio
+async def test_repl_reports_unavailable_commands_and_toggles_thinking_off() -> None:
+    application = AgentApplication(
+        FakeProvider([]), ToolDispatcher(ToolCatalog({})), InMemorySessionStore()
+    )
+    inputs: Iterator[str] = iter(
+        (
+            " ",
+            "/help",
+            "/model",
+            "/model unavailable",
+            "/clear",
+            "/thinking",
+            "/thinking",
+            "/context",
+            "/compact",
+            "/unknown argument",
+            "/exit",
+        )
+    )
+    output: list[str] = []
+
+    async def read_input() -> str:
+        return next(inputs)
+
+    await run_repl(
+        application,
+        read_input=read_input,
+        write_output=output.append,
+        model="current/model",
+    )
+
+    rendered = "".join(output)
+    assert "Commands: /help" in rendered
+    assert "Model: current/model; available: current/model" in rendered
+    assert "Model switching is unavailable." in rendered
+    assert "Starting a new session is unavailable." in rendered
+    assert "Thinking details: shown." in rendered
+    assert "Thinking details: hidden." in rendered
+    assert "Context management is unavailable." in rendered
+    assert "Context is too short to compact." in rendered
+    assert "Unknown command: /unknown. Use /help." in rendered
+
+
+@pytest.mark.asyncio
+async def test_repl_keeps_running_after_transition_errors() -> None:
+    application = AgentApplication(
+        FakeProvider([]), ToolDispatcher(ToolCatalog({})), InMemorySessionStore()
+    )
+
+    async def switch_model(target: str | None) -> CliTransition:
+        if target == "invalid/model":
+            raise RuntimeConfigurationError("not configured")
+        raise RuntimeError("unexpected internal detail")
+
+    async def clear_session(_unused: str | None) -> CliTransition:
+        raise RuntimeError("unexpected internal detail")
+
+    inputs: Iterator[str] = iter(("/model invalid/model", "/model broken/model", "/clear", "/exit"))
+    output: list[str] = []
+
+    async def read_input() -> str:
+        return next(inputs)
+
+    await run_repl(
+        application,
+        read_input=read_input,
+        write_output=output.append,
+        switch_model=switch_model,
+        clear_session=clear_session,
+    )
+
+    rendered = "".join(output)
+    assert "Model switch failed: not configured" in rendered
+    assert "[error] Model switch failed." in rendered
+    assert "[error] Unable to start a new session." in rendered
+    assert "unexpected internal detail" not in rendered
 
 
 def test_console_output_does_not_treat_model_text_as_rich_markup() -> None:
