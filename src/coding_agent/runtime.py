@@ -197,6 +197,7 @@ async def create_runtime(
     settings: RuntimeSettings,
     *,
     resume: bool = False,
+    resume_session_id: str | None = None,
     provider: Provider | None = None,
 ) -> AgentRuntime:
     project_root = discover_project_root(settings.workspace)
@@ -206,8 +207,14 @@ async def create_runtime(
         settings.data_root,
         redactor=redactor,
     )
-    recovered = await sessions.resume_latest(workspace_root) if resume else None
-    if resume and recovered is None:
+    recovered = (
+        await sessions.resume(workspace_root, resume_session_id)
+        if resume_session_id is not None
+        else await sessions.resume_latest(workspace_root)
+        if resume
+        else None
+    )
+    if (resume or resume_session_id is not None) and recovered is None:
         raise RuntimeConfigurationError("No session exists for this project")
     if recovered is None:
         store = await sessions.create(workspace_root)

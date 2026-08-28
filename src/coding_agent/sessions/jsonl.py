@@ -97,6 +97,17 @@ class RecoveredSession:
     compactions: tuple[CompactionRecord, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class SessionSummary:
+    session_id: str
+    title: str
+    created_at: str
+    updated_at: str
+    model: str | None
+    exchange_count: int
+    compacted: bool
+
+
 class JsonlSessionStore:
     def __init__(
         self,
@@ -162,6 +173,53 @@ class JsonlSessionRepository:
         if not candidates:
             return None
         latest = max(candidates, key=lambda path: (path.stat().st_mtime_ns, path.name))
+        return await self._resume_path(latest)
+
+    async def resume(
+        self, project_root: Path, session_id: str
+    ) -> RecoveredSession | None:
+        if not _SESSION_ID.fullmatch(session_id):
+            raise ValueError("session_id contains unsupported characters")
+        path = self._sessions_root / _project_key(project_root) / f"{session_id}.jsonl"
+        if not path.is_file():
+            return None
+        return await self._resume_path(path)
+
+    async def list_sessions(self, project_root: Path) -> tuple[SessionSummary, ...]:
+        directory = self._sessions_root / _project_key(project_root)
+        if not directory.is_dir():
+            return ()
+        summaries: list[SessionSummary] = []
+        for path in directory.glob("*.jsonl"):
+            try:
+                events, _warnings = _read_events(path, repair_incomplete=False)
+                if not events:
+                    continue
+                conversation, _, _, _, compaction, model, _ = _replay(events)
+            except SessionCorruptError:
+                continue
+            first_prompt = next(
+                (
+                    " ".join(exchange.content.split())
+                    for exchange in conversation
+                    if isinstance(exchange, UserExchange) and exchange.content.strip()
+                ),
+                "Untitled session",
+            )
+            summaries.append(
+                SessionSummary(
+                    session_id=events[0].session_id,
+                    title=_truncate_title(first_prompt),
+                    created_at=events[0].timestamp,
+                    updated_at=events[-1].timestamp,
+                    model=model,
+                    exchange_count=len(conversation),
+                    compacted=compaction is not None,
+                )
+            )
+        return tuple(sorted(summaries, key=lambda item: item.updated_at, reverse=True))
+
+    async def _resume_path(self, latest: Path) -> RecoveredSession:
         events, warnings = _read_events(latest)
         if not events:
             raise SessionCorruptError("Session has no complete records")
@@ -214,7 +272,9 @@ def _project_key(project_root: Path) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
 
 
-def _read_events(path: Path) -> tuple[list[SessionEvent], list[str]]:
+def _read_events(
+    path: Path, *, repair_incomplete: bool = True
+) -> tuple[list[SessionEvent], list[str]]:
     raw = path.read_bytes()
     lines = raw.splitlines(keepends=True)
     events: list[SessionEvent] = []
@@ -228,13 +288,20 @@ def _read_events(path: Path) -> tuple[list[SessionEvent], list[str]]:
             if not is_incomplete_tail:
                 raise SessionCorruptError(f"Invalid JSON at line {index}") from error
             warnings.append("Skipped an incomplete final session record")
-            _truncate_file(path, valid_bytes)
+            if repair_incomplete:
+                _truncate_file(path, valid_bytes)
             break
         event = _decode_event(decoded, line_number=index)
         events.append(event)
         valid_bytes += len(raw_line)
     _validate_event_sequence(events)
     return events, warnings
+
+
+def _truncate_title(value: str, limit: int = 100) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1] + "…"
 
 
 def _truncate_file(path: Path, length: int) -> None:

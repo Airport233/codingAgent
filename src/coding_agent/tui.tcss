@@ -133,3 +133,40 @@ Footer {
     background: #0b0f14;
     color: #64748b;
 }
+
+ResumeSessionScreen {
+    background: #0b0f14;
+    color: #d7dde5;
+    layout: vertical;
+    padding: 1 2;
+}
+
+#resume-title {
+    height: 3;
+    padding: 1 1;
+    color: #7dd3fc;
+    text-style: bold;
+    border-bottom: solid #243244;
+}
+
+#resume-options {
+    height: 1fr;
+    margin-top: 1;
+    background: #111821;
+    border: round #334155;
+}
+
+#resume-preview {
+    height: 9;
+    padding: 1 2;
+    margin-top: 1;
+    background: #0f1720;
+    color: #b6c2d1;
+    border: round #334155;
+}
+
+#resume-help {
+    height: 2;
+    padding: 0 1;
+    color: #64748b;
+}

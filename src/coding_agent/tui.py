@@ -6,6 +6,7 @@ import sys
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import ClassVar, Literal
 
 from textual import on
@@ -13,6 +14,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
+from textual.screen import Screen
 from textual.timer import Timer
 from textual.widgets import Collapsible, Footer, Label, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
@@ -46,6 +48,7 @@ from coding_agent.events import (
     WarningRaised,
 )
 from coding_agent.runtime import RuntimeConfigurationError
+from coding_agent.sessions.jsonl import SessionSummary
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +60,8 @@ class CliTransition:
 
 
 TransitionCallback = Callable[[str | None], Awaitable[CliTransition]]
+SessionListCallback = Callable[[], Awaitable[tuple[SessionSummary, ...]]]
+ResumeCallback = Callable[[str], Awaitable[CliTransition]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +76,7 @@ SLASH_COMMANDS = (
     SlashCommand("context", "Show context usage"),
     SlashCommand("compact", "Compact conversation context"),
     SlashCommand("thinking", "Toggle thinking details"),
+    SlashCommand("resume", "Resume a saved session"),
     SlashCommand("clear", "Start a new empty session"),
     SlashCommand("exit", "Exit codingAgent"),
 )
@@ -183,6 +189,85 @@ class CompactionProgress(Static):
         self.update(message)
 
 
+class ResumeSessionScreen(Screen[str | None]):
+    """Full-screen chooser for project-scoped saved sessions."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("escape", "cancel", "Back", show=True),
+        Binding("ctrl+c", "cancel", "Back", show=False),
+    ]
+
+    def __init__(
+        self, sessions: tuple[SessionSummary, ...], *, current_session_id: str
+    ) -> None:
+        super().__init__()
+        self.sessions = sessions
+        self.current_session_id = current_session_id
+
+    def compose(self) -> ComposeResult:
+        yield Static("Resume a previous session", id="resume-title")
+        options = [
+            Option(self._option_label(session), id=session.session_id) for session in self.sessions
+        ]
+        if not options:
+            options = [Option("No saved sessions for this workspace", disabled=True)]
+        yield OptionList(*options, id="resume-options", markup=False)
+        yield Static(self._preview(0), id="resume-preview", markup=False)
+        yield Static("↑/↓ select · Enter resume · Esc cancel", id="resume-help")
+
+    def on_mount(self) -> None:
+        choices = self.query_one("#resume-options", OptionList)
+        if self.sessions:
+            choices.highlighted = 0
+        choices.focus()
+
+    @on(OptionList.OptionHighlighted, "#resume-options")
+    def show_preview(self, event: OptionList.OptionHighlighted) -> None:
+        if event.option_id is None:
+            return
+        index = next(
+            (
+                index
+                for index, session in enumerate(self.sessions)
+                if session.session_id == event.option_id
+            ),
+            None,
+        )
+        if index is not None:
+            self.query_one("#resume-preview", Static).update(self._preview(index))
+
+    @on(OptionList.OptionSelected, "#resume-options")
+    def select_session(self, event: OptionList.OptionSelected) -> None:
+        if event.option_id is not None:
+            self.dismiss(str(event.option_id))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _option_label(self, session: SessionSummary) -> str:
+        current = " · current" if session.session_id == self.current_session_id else ""
+        compacted = " · compacted" if session.compacted else ""
+        return (
+            f"{session.title}  ·  {_display_time(session.updated_at)}"
+            f"{compacted}{current}"
+        )
+
+    def _preview(self, index: int) -> str:
+        if not self.sessions:
+            return "Start a conversation before using /resume."
+        session = self.sessions[index]
+        model = session.model or "unknown model"
+        compacted = "yes" if session.compacted else "no"
+        return (
+            f"{session.title}\n\n"
+            f"Session: {session.session_id}\n"
+            f"Created: {_display_time(session.created_at)}\n"
+            f"Updated: {_display_time(session.updated_at)}\n"
+            f"Model: {model}\n"
+            f"Exchanges: {session.exchange_count} · Compacted: {compacted}"
+        )
+
+
 class CodingAgentTui(App[None]):
     CSS_PATH = "tui.tcss"
     TITLE = "codingAgent"
@@ -203,6 +288,8 @@ class CodingAgentTui(App[None]):
         available_models: tuple[str, ...] = (),
         switch_model: TransitionCallback | None = None,
         clear_session: TransitionCallback | None = None,
+        list_sessions: SessionListCallback | None = None,
+        resume_session: ResumeCallback | None = None,
     ) -> None:
         super().__init__()
         self.application = application
@@ -212,6 +299,8 @@ class CodingAgentTui(App[None]):
         self.available_models = available_models
         self.switch_model = switch_model
         self.clear_session = clear_session
+        self.list_sessions = list_sessions
+        self.resume_session = resume_session
         self.thinking_visible = False
         self._turn_worker: Worker[None] | None = None
         self._assistant: Static | None = None
@@ -502,7 +591,7 @@ class CodingAgentTui(App[None]):
     async def _command(self, prompt: str) -> None:
         if prompt == "/help":
             await self._notice(
-                "/model [provider/model]  /context  /compact  /thinking  /clear  /exit",
+                "/model [provider/model]  /context  /compact  /thinking  /resume  /clear  /exit",
                 "info",
             )
         elif prompt == "/model":
@@ -534,6 +623,22 @@ class CodingAgentTui(App[None]):
             self._install_transition(transition)
             await self.query_one("#conversation", VerticalScroll).remove_children()
             await self._notice("Started a new empty session.", "info")
+        elif prompt == "/resume":
+            if self._turn_worker is not None and self._turn_worker.is_running:
+                await self._notice("'/resume' is disabled while a task is in progress.", "warning")
+                return
+            if self.list_sessions is None or self.resume_session is None:
+                await self._notice("Session selection is unavailable.", "error")
+                return
+            try:
+                sessions = await self.list_sessions()
+            except Exception:
+                await self._notice("Unable to list saved sessions.", "error")
+                return
+            self.push_screen(
+                ResumeSessionScreen(sessions, current_session_id=self.session_id),
+                self._resume_selected,
+            )
         elif prompt == "/thinking":
             await self.action_toggle_thinking()
         elif prompt == "/context":
@@ -599,6 +704,40 @@ class CodingAgentTui(App[None]):
         self.query_one("#status-model", Label).update(self.model)
         self.query_one("#status-session", Label).update(f"session {self.session_id[:8]}")
         self.query_one("#status-context", Label).update(self._context_label())
+
+    def _resume_selected(self, session_id: str | None) -> None:
+        if session_id is None:
+            return
+        self.run_worker(
+            self._resume_session(session_id), group="session-transition", exclusive=True
+        )
+
+    async def _resume_session(self, session_id: str) -> None:
+        if self._turn_worker is not None and self._turn_worker.is_running:
+            await self._notice("'/resume' is disabled while a task is in progress.", "warning")
+            return
+        if self.resume_session is None:
+            await self._notice("Session selection is unavailable.", "error")
+            return
+        composer = self.query_one("#composer", PromptTextArea)
+        composer.disabled = True
+        try:
+            transition = await self.resume_session(session_id)
+        except RuntimeConfigurationError as error:
+            await self._notice(f"Session resume failed: {error}", "error")
+            return
+        except Exception:
+            await self._notice("Session resume failed.", "error")
+            return
+        finally:
+            composer.disabled = False
+            composer.focus()
+        self._install_transition(transition)
+        await self.query_one("#conversation", VerticalScroll).remove_children()
+        self._prompt_history.clear()
+        self._history_index = None
+        self._last_history_text = None
+        await self._render_recovered_history()
 
     async def _mount(self, widget: Static | Collapsible) -> None:
         conversation = self.query_one("#conversation", VerticalScroll)
@@ -817,6 +956,13 @@ def _preview_text(value: str, limit: int) -> str:
         return value
     omitted = len(value) - limit
     return f"{value[:limit]}\n… [{omitted} characters omitted from display]"
+
+
+def _display_time(value: str) -> str:
+    try:
+        return datetime.fromisoformat(value).astimezone().strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return value
 
 
 async def _copy_to_macos_clipboard(text: str) -> None:

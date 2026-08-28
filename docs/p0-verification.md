@@ -12,6 +12,7 @@ repository-wide quality command is the GitHub Actions `CI` workflow on macOS and
 | FR-CLI-008 | composer wrapping, multiline submission and `test_empty_composer_navigates_prompt_history_and_text_arrows_move_to_edges` |
 | FR-CLI-009–010 | conversation/input selection-copy tests, CLI `--prompt` integration tests |
 | FR-CLI-011 | `test_slash_popup_filters_navigates_completes_and_dismisses`, `test_model_command_opens_secondary_picker_and_switches_selection` |
+| FR-SESS-006, FR-CMD-008 | `test_sessions_can_be_listed_and_resumed_by_id`, `test_resume_command_opens_full_screen_picker_and_installs_selection`, `test_resume_is_explicitly_blocked_while_a_turn_is_running` |
 | FR-PROV-001–006 | `test_runtime_settings_load_user_provider_profile`, `test_repl_lists_and_switches_models_then_starts_a_new_session` |
 | FR-PROV-007, FR-PROV-010–012 | `tests/providers/`, `test_runtime_resume_with_new_model_excludes_old_thinking_from_requests` |
 | FR-AGENT-001–007 | `tests/test_walking_skeleton.py`, including multi-tool, cancellation and recoverable-error cases |

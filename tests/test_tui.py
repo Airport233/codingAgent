@@ -24,11 +24,18 @@ from coding_agent.domain import (
 )
 from coding_agent.providers.base import ProviderEvent, ProviderResponseFinished
 from coding_agent.providers.fake import FakeProvider
+from coding_agent.sessions.jsonl import SessionSummary
 from coding_agent.sessions.memory import InMemorySessionStore
 from coding_agent.tools.base import ToolOutput, ToolSpec
 from coding_agent.tools.catalog import ToolCatalog
 from coding_agent.tools.dispatcher import ToolDispatcher
-from coding_agent.tui import CliTransition, CodingAgentTui, CompactionProgress, PromptTextArea
+from coding_agent.tui import (
+    CliTransition,
+    CodingAgentTui,
+    CompactionProgress,
+    PromptTextArea,
+    ResumeSessionScreen,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -250,6 +257,7 @@ async def test_slash_popup_allocates_visible_rows_for_every_command_match() -> N
         for prefix, expected in (
             ("/c", ("/context", "/compact", "/clear")),
             ("/m", ("/model",)),
+            ("/r", ("/resume",)),
             ("/h", ("/help",)),
             ("/t", ("/thinking",)),
         ):
@@ -262,6 +270,130 @@ async def test_slash_popup_allocates_visible_rows_for_every_command_match() -> N
                 == expected
             )
             assert choices.size.height >= len(expected)
+
+
+async def test_resume_command_opens_full_screen_picker_and_installs_selection() -> None:
+    initial = application_with_response()
+    resumed = AgentApplication(
+        FakeProvider([]),
+        ToolDispatcher(ToolCatalog({})),
+        InMemorySessionStore(),
+        initial_exchanges=(
+            UserExchange("Selected historical task"),
+            AssistantExchange((TextBlock("Historical answer"),), "end_turn"),
+        ),
+    )
+    sessions = (
+        SessionSummary(
+            "session-1",
+            "Current task",
+            "2026-08-28T08:00:00+00:00",
+            "2026-08-28T09:00:00+00:00",
+            "provider/model",
+            4,
+            False,
+        ),
+        SessionSummary(
+            "session-2",
+            "Selected historical task",
+            "2026-08-27T08:00:00+00:00",
+            "2026-08-27T09:00:00+00:00",
+            "provider/other",
+            2,
+            True,
+        ),
+    )
+    resumed_ids: list[str] = []
+
+    async def list_sessions() -> tuple[SessionSummary, ...]:
+        return sessions
+
+    async def resume_session(session_id: str) -> CliTransition:
+        resumed_ids.append(session_id)
+        return CliTransition(resumed, "provider/model", session_id, ("provider/model",))
+
+    app = CodingAgentTui(
+        initial,
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+        available_models=("provider/model",),
+        list_sessions=list_sessions,
+        resume_session=resume_session,
+    )
+
+    async with app.run_test() as pilot:
+        await app._command("/resume")
+        await pilot.pause()
+
+        assert isinstance(app.screen, ResumeSessionScreen)
+        options = app.screen.query_one("#resume-options", OptionList)
+        assert options.option_count == 2
+        assert "Current task" in str(options.get_option_at_index(0).prompt)
+        assert "current" in str(options.get_option_at_index(0).prompt)
+        assert "Selected historical task" in str(options.get_option_at_index(1).prompt)
+
+        await pilot.press("down", "enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert resumed_ids == ["session-2"]
+        assert app.session_id == "session-2"
+        rendered = "\n".join(
+            str(child.render()) for child in app.query_one("#conversation").children
+        )
+        assert "Selected historical task" in rendered
+        assert "Historical answer" in rendered
+
+
+async def test_resume_is_explicitly_blocked_while_a_turn_is_running() -> None:
+    class SlowProvider:
+        async def stream(
+            self,
+            conversation: tuple[ConversationExchange, ...],
+            tools: tuple[ToolSpec, ...],
+            system_instructions: str | None = None,
+        ) -> AsyncIterator[ProviderEvent]:
+            del conversation, tools, system_instructions
+            await asyncio.Event().wait()
+            if False:
+                yield
+
+    list_called = False
+
+    async def list_sessions() -> tuple[SessionSummary, ...]:
+        nonlocal list_called
+        list_called = True
+        return ()
+
+    async def resume_session(_session_id: str) -> CliTransition:
+        raise AssertionError("resume callback must not run during an active turn")
+
+    app = CodingAgentTui(
+        AgentApplication(
+            SlowProvider(), ToolDispatcher(ToolCatalog({})), InMemorySessionStore()
+        ),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+        list_sessions=list_sessions,
+        resume_session=resume_session,
+    )
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer", PromptTextArea)
+        composer.value = "Keep working"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        await app._command("/resume")
+        await pilot.pause()
+
+        assert list_called is False
+        assert "disabled while a task is in progress" in str(
+            list(app.query(".notice"))[-1].render()
+        )
+        await app.action_cancel_turn()
 
 
 async def test_slash_popup_handles_plain_completion_and_no_matches() -> None:

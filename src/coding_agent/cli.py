@@ -28,6 +28,7 @@ from coding_agent.runtime import (
     RuntimeSettings,
     create_runtime,
 )
+from coding_agent.sessions.jsonl import JsonlSessionRepository, SessionSummary
 from coding_agent.tui import CliTransition, CodingAgentTui
 
 type TransitionCallback = Callable[[str | None], Awaitable[CliTransition]]
@@ -96,7 +97,7 @@ async def run_repl(
         if prompt == "/help":
             write_output(
                 "Commands: /help, /model [provider/model], /context, /compact, "
-                "/thinking, /clear, /exit\n"
+                "/thinking, /resume, /clear, /exit\n"
             )
             continue
         if prompt == "/model":
@@ -141,6 +142,9 @@ async def run_repl(
             thinking_visible = not thinking_visible
             state = "shown" if thinking_visible else "hidden"
             write_output(f"Thinking details: {state}.\n")
+            continue
+        if prompt == "/resume":
+            write_output("Session selection requires the interactive TUI.\n")
             continue
         if prompt == "/context":
             status = application.context_status()
@@ -297,6 +301,23 @@ async def _run_cli(
         runtime = await create_runtime(current_settings)
         return _transition(runtime, current_settings)
 
+    async def list_sessions() -> tuple[SessionSummary, ...]:
+        repository = JsonlSessionRepository(current_settings.data_root)
+        return await repository.list_sessions(current_settings.workspace)
+
+    async def resume_session(session_id: str) -> CliTransition:
+        nonlocal runtime
+        if session_id == runtime.session_id:
+            return _transition(runtime, current_settings)
+        next_runtime = await create_runtime(
+            current_settings,
+            resume_session_id=session_id,
+        )
+        await runtime.application.close_session()
+        await runtime.aclose()
+        runtime = next_runtime
+        return _transition(runtime, current_settings)
+
     try:
         if prompt is not None:
             prompts = iter((prompt, "/exit"))
@@ -324,6 +345,8 @@ async def _run_cli(
             available_models=current_settings.available_models,
             switch_model=switch_model,
             clear_session=clear_session,
+            list_sessions=list_sessions,
+            resume_session=resume_session,
         )
         await tui.run_async()
     finally:

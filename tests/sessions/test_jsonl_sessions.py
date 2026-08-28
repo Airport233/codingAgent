@@ -121,6 +121,47 @@ async def test_resume_latest_is_scoped_to_the_current_project(
 
 
 @pytest.mark.asyncio
+async def test_sessions_can_be_listed_and_resumed_by_id(
+    roots: tuple[Path, Path, Path],
+) -> None:
+    data_root, project, other_project = roots
+    repository = JsonlSessionRepository(data_root)
+    first = await repository.create(project, session_id="first")
+    await first.append("model_changed", {"previous": None, "current": "provider/model-a"})
+    await first.append("user_exchange", UserExchange("  First\nconversation   title  "))
+    await first.append("assistant_exchange", AssistantExchange((TextBlock("answer"),), "end_turn"))
+    await first.append(
+        "compaction_completed",
+        {
+            "reason": "manual",
+            "strategy": "deterministic",
+            "retained_from": 1,
+            "before_tokens": 100,
+            "after_tokens": 50,
+            "summary": "summary",
+        },
+    )
+    second = await repository.create(project, session_id="second")
+    await second.append("user_exchange", UserExchange("Second conversation"))
+    other = await repository.create(other_project, session_id="other")
+    await other.append("user_exchange", UserExchange("Must not be listed"))
+
+    summaries = await repository.list_sessions(project)
+
+    assert [summary.session_id for summary in summaries] == ["second", "first"]
+    first_summary = summaries[1]
+    assert first_summary.title == "First conversation title"
+    assert first_summary.model == "provider/model-a"
+    assert first_summary.exchange_count == 2
+    assert first_summary.compacted is True
+    recovered = await repository.resume(project, "first")
+    assert recovered is not None
+    assert recovered.store.session_id == "first"
+    assert recovered.conversation[0] == UserExchange("  First\nconversation   title  ")
+    assert await repository.resume(project, "other") is None
+
+
+@pytest.mark.asyncio
 async def test_starting_a_new_session_preserves_the_closed_session_file(
     roots: tuple[Path, Path, Path],
 ) -> None:
