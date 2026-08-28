@@ -115,3 +115,42 @@ async def test_provider_uses_low_level_messages_stream_and_internal_events() -> 
             "extra_body": {"thinking_effort": "high"},
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_provider_ignores_sdk_convenience_events_between_raw_events() -> None:
+    client = FakeClient(
+        [
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "hello"},
+            },
+            {"type": "text", "text": "hello", "snapshot": "hello"},
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": 2},
+            },
+            {
+                "type": "message_stop",
+                "message": {"content": [{"type": "text", "text": "hello"}]},
+            },
+        ]
+    )
+    provider = AnthropicMessagesProvider(
+        client=client,
+        model="example-model",
+        max_tokens=128,
+    )
+
+    events = [event async for event in provider.stream((UserExchange("hello"),), ())]
+
+    assert events.count(ProviderTextDelta(text="hello")) == 1
+    assert isinstance(events[-1], ProviderResponseFinished)
