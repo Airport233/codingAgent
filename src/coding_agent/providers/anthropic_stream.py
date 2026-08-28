@@ -200,7 +200,7 @@ class AnthropicStreamAggregator:
     def _string(container: dict[str, object], key: str) -> str:
         value = container.get(key)
         if not isinstance(value, str) or not value:
-            if value == "" and key in {"text", "thinking", "signature"}:
+            if value == "" and key in {"partial_json", "signature", "text", "thinking"}:
                 return ""
             raise AnthropicProtocolError(f"{key} must be a string")
         return value

@@ -10,6 +10,10 @@ from coding_agent.providers.anthropic_stream import AnthropicStreamAggregator
 from coding_agent.providers.base import ProviderEvent
 from coding_agent.tools.base import ToolSpec
 
+_SDK_CONVENIENCE_EVENT_TYPES = frozenset(
+    {"citation", "input_json", "signature", "text", "thinking"}
+)
+
 
 class AnthropicMessagesProvider:
     """Low-level Anthropic Messages stream adapter.
@@ -58,5 +62,7 @@ class AnthropicMessagesProvider:
         async with self._client.messages.stream(**request) as sdk_stream:
             async for sdk_event in sdk_stream:
                 raw = cast(dict[str, object], sdk_event.model_dump(mode="json"))
+                if raw.get("type") in _SDK_CONVENIENCE_EVENT_TYPES:
+                    continue
                 for event in aggregator.consume(raw):
                     yield event
