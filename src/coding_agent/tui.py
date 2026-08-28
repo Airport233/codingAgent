@@ -54,7 +54,7 @@ from coding_agent.events import (
 from coding_agent.plan import PlanStep
 from coding_agent.runtime import RuntimeConfigurationError
 from coding_agent.sessions.jsonl import SessionSummary
-from coding_agent.skills import format_skill_list
+from coding_agent.skills import PROJECT_INIT_TASK, format_skill_list
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +85,7 @@ SLASH_COMMANDS = (
     SlashCommand("thinking", "Toggle thinking details"),
     SlashCommand("skills", "List available coding workflows"),
     SlashCommand("skill", "Run a task with a coding workflow", "<name> <task>"),
+    SlashCommand("init", "Draft project memory instructions"),
     SlashCommand("resume", "Resume a saved session"),
     SlashCommand("clear", "Start a new empty session"),
     SlashCommand("exit", "Exit codingAgent"),
@@ -752,6 +753,18 @@ class CodingAgentTui(App[None]):
                 await self._notice(f"Unknown skill: {skill_name}. Use /skills.", "error")
                 return
             await self._start_turn(task, skill_name=skill_name, history_prompt=prompt)
+        elif prompt == "/init":
+            available = {
+                name for name, _description, _source in self.application.available_skills()
+            }
+            if "project-init" not in available:
+                await self._notice("Project memory initialization is unavailable.", "error")
+                return
+            await self._start_turn(
+                PROJECT_INIT_TASK,
+                skill_name="project-init",
+                history_prompt=prompt,
+            )
         elif prompt == "/clear":
             if self.clear_session is None:
                 await self._notice("Starting a new session is unavailable.", "error")

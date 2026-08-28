@@ -57,6 +57,7 @@ async def test_slash_help_uses_one_aligned_command_per_line() -> None:
         "  /thinking                Toggle thinking details",
         "  /skills                  List available coding workflows",
         "  /skill <name> <task>     Run a task with a coding workflow",
+        "  /init                    Draft project memory instructions",
         "  /resume                  Resume a saved session",
         "  /clear                   Start a new empty session",
         "  /exit                    Exit codingAgent",
@@ -91,6 +92,13 @@ def application_with_skills(text: str = "Skill completed.") -> AgentApplication:
                     "Reproduce the failure first.",
                     "builtin",
                     Path("test-fix.md"),
+                ),
+                SkillDefinition(
+                    "project-init",
+                    "Draft project memory",
+                    "Inspect the project and draft instructions without writing files.",
+                    "builtin",
+                    Path("project-init.md"),
                 ),
             )
         ),
@@ -629,6 +637,46 @@ async def test_skill_name_completion_uses_available_workflows() -> None:
         await pilot.press("tab")
         await pilot.pause()
         assert composer.value == "/skill test-fix "
+
+
+async def test_init_command_runs_preview_only_project_memory_skill() -> None:
+    application = application_with_skills("Draft ready.")
+    app = CodingAgentTui(
+        application,
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer", PromptTextArea)
+        composer.value = "/init"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert "Draft project memory" in str(app.query_one(".user-message").render())
+        assert "project-init" in str(app.query_one(".skill-boundary").render())
+        assert "Draft ready." in str(app.query_one(".assistant-message").render())
+
+
+async def test_init_command_reports_when_project_memory_skill_is_unavailable() -> None:
+    app = CodingAgentTui(
+        application_with_response(),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer", PromptTextArea)
+        composer.value = "/init"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert "Project memory initialization is unavailable." in str(
+            app.query_one(".notice").render()
+        )
 
 
 async def test_model_command_opens_secondary_picker_and_switches_selection() -> None:

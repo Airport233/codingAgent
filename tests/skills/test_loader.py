@@ -95,13 +95,14 @@ def test_snapshot_supports_lookup_and_prompt_rendering(tmp_path: Path) -> None:
     assert snapshot.get("missing") is None
 
 
-def test_default_loader_exposes_the_three_builtin_coding_workflows(tmp_path: Path) -> None:
+def test_default_loader_exposes_builtin_coding_workflows(tmp_path: Path) -> None:
     snapshot = SkillLoader.default(
         user_dir=tmp_path / "user", project_dir=tmp_path / "project"
     ).load()
 
     assert [skill.name for skill in snapshot.skills] == [
         "code-review",
+        "project-init",
         "project-map",
         "test-fix",
     ]

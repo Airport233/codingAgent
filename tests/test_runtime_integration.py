@@ -118,6 +118,11 @@ async def test_runtime_loads_builtin_and_project_override_skills(tmp_path: Path)
     assert runtime.application.available_skills() == (
         ("code-review", "Review code changes for concrete, actionable defects", "builtin"),
         (
+            "project-init",
+            "Draft safe project memory instructions without writing files",
+            "builtin",
+        ),
+        (
             "project-map",
             "Map a repository's entry points, architecture, tests, and workflows",
             "builtin",
@@ -555,6 +560,55 @@ async def test_repl_lists_and_runs_a_skill() -> None:
     assert "[skill] test-fix" in rendered
     assert "fixed" in rendered
     assert "Reproduce first." in provider.system_instructions[0]
+
+
+@pytest.mark.asyncio
+async def test_repl_init_runs_preview_only_project_memory_workflow() -> None:
+    provider = FakeProvider([AssistantExchange((TextBlock("draft ready"),), "end_turn")])
+    application = AgentApplication(
+        provider,
+        ToolDispatcher(ToolCatalog({})),
+        InMemorySessionStore(),
+        skills=SkillSnapshot(
+            (
+                SkillDefinition(
+                    "project-init",
+                    "Draft project memory",
+                    "Inspect and draft only; do not write files.",
+                    "builtin",
+                    Path("project-init.md"),
+                ),
+            )
+        ),
+    )
+    inputs: Iterator[str] = iter(("/init", "/exit"))
+    output: list[str] = []
+
+    async def read_input() -> str:
+        return next(inputs)
+
+    await run_repl(application, read_input=read_input, write_output=output.append)
+
+    rendered = "".join(output)
+    assert "[skill] project-init" in rendered
+    assert "draft ready" in rendered
+    assert "do not write files" in provider.system_instructions[0]
+
+
+@pytest.mark.asyncio
+async def test_repl_init_reports_when_project_memory_skill_is_unavailable() -> None:
+    application = AgentApplication(
+        FakeProvider([]), ToolDispatcher(ToolCatalog({})), InMemorySessionStore()
+    )
+    inputs: Iterator[str] = iter(("/init", "/exit"))
+    output: list[str] = []
+
+    async def read_input() -> str:
+        return next(inputs)
+
+    await run_repl(application, read_input=read_input, write_output=output.append)
+
+    assert "Project memory initialization is unavailable." in "".join(output)
 
 
 @pytest.mark.asyncio

@@ -33,7 +33,7 @@ from coding_agent.runtime import (
     create_runtime,
 )
 from coding_agent.sessions.jsonl import JsonlSessionRepository, SessionSummary
-from coding_agent.skills import format_skill_list
+from coding_agent.skills import PROJECT_INIT_TASK, format_skill_list
 from coding_agent.tui import CliTransition, CodingAgentTui, format_slash_help
 
 type TransitionCallback = Callable[[str | None], Awaitable[CliTransition]]
@@ -123,6 +123,13 @@ async def run_repl(
                 continue
             skill_name = parts[1]
             prompt = parts[2].strip()
+        if prompt == "/init":
+            available = {name for name, _description, _source in application.available_skills()}
+            if "project-init" not in available:
+                write_output("Project memory initialization is unavailable.\n")
+                continue
+            skill_name = "project-init"
+            prompt = PROJECT_INIT_TASK
         if prompt == "/model":
             choices = ", ".join(available_models) or model
             write_output(f"Model: {model}; available: {choices}\n")

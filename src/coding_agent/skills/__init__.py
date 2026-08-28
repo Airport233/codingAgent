@@ -1,5 +1,10 @@
 from coding_agent.skills.loader import SkillDefinition, SkillLoader, SkillSnapshot
 
+PROJECT_INIT_TASK = (
+    "Draft project memory instructions for this repository. Inspect the project and "
+    "return a proposed CODING_AGENT.md without writing or modifying files."
+)
+
 
 def format_skill_list(
     skills: tuple[tuple[str, str, str], ...], warnings: tuple[str, ...] = ()
@@ -19,4 +24,10 @@ def format_skill_list(
     return "\n".join(lines)
 
 
-__all__ = ["SkillDefinition", "SkillLoader", "SkillSnapshot", "format_skill_list"]
+__all__ = [
+    "PROJECT_INIT_TASK",
+    "SkillDefinition",
+    "SkillLoader",
+    "SkillSnapshot",
+    "format_skill_list",
+]
