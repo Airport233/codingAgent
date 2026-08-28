@@ -5,4 +5,7 @@ default_model = "example/example-model"
 protocol = "anthropic-messages"
 base_url = "https://example.invalid/anthropic"
 api_key_env = "CODING_AGENT_EXAMPLE_API_KEY"
-models = ["example-model"]
+
+[providers.example.models.example-model]
+context_window = 131072
+max_output_tokens = 8192

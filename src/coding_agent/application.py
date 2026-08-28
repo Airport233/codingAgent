@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Sequence
 
 from coding_agent.context import CompactionCheckpoint, ContextManager, ContextStatus
@@ -37,6 +38,7 @@ class AgentApplication:
         memory_loader: ProjectMemoryLoader | None = None,
         initial_exchanges: Sequence[ConversationExchange] = (),
         context_manager: ContextManager | None = None,
+        context_reprojected: bool = False,
     ) -> None:
         self._provider = provider
         self._dispatcher = dispatcher
@@ -46,19 +48,25 @@ class AgentApplication:
         self._last_memory_digest: str | None = None
         self._conversation = Conversation(list(initial_exchanges))
         self._context_manager = context_manager
+        self._context_reprojected = context_reprojected
 
     def context_status(self) -> ContextStatus | None:
         if self._context_manager is None:
             return None
-        return self._context_manager.status(self._conversation.snapshot())
+        system_instructions = self._load_system_instructions()
+        return self._context_manager.status(
+            self._conversation.snapshot(),
+            self._supplemental_characters(system_instructions),
+        )
 
     async def compact_context(self, reason: str = "manual") -> CompactionCheckpoint | None:
         if self._context_manager is None:
             return None
         history = self._conversation.snapshot()
+        supplemental_characters = self._supplemental_characters(self._load_system_instructions())
         summarize = (
             None
-            if self._context_manager.status(history).level == "hard"
+            if self._context_manager.status(history, supplemental_characters).level == "hard"
             else self._request_context_summary
         )
         return await self._context_manager.compact(
@@ -66,7 +74,25 @@ class AgentApplication:
             reason=reason,
             persist=self._sessions.append,
             summarize=summarize,
+            supplemental_characters=supplemental_characters,
         )
+
+    def _load_system_instructions(self) -> str | None:
+        if self._memory_loader is None:
+            return None
+        return self._memory_loader.load().rendered or None
+
+    def _supplemental_characters(self, system_instructions: str | None) -> int:
+        tools = [
+            {
+                "name": spec.name,
+                "description": spec.description,
+                "input_schema": spec.input_schema,
+            }
+            for spec in self._dispatcher.catalog.specs
+        ]
+        serialized_tools = json.dumps(tools, ensure_ascii=False, sort_keys=True)
+        return len(system_instructions or "") + len(serialized_tools)
 
     async def _request_context_summary(self, exchanges: tuple[ConversationExchange, ...]) -> str:
         instruction = UserExchange(
@@ -89,13 +115,17 @@ class AgentApplication:
         self._conversation.exchanges.append(user_exchange)
         await self._sessions.append("user_exchange", user_exchange)
         yield AgentStarted(prompt=prompt)
+        if self._context_reprojected:
+            yield WarningRaised(
+                "Context was reprojected for the selected model; prior-model thinking was omitted"
+            )
+            self._context_reprojected = False
 
         for _step in range(self._max_steps):
             response: AssistantExchange | None = None
-            system_instructions: str | None = None
+            system_instructions = self._load_system_instructions()
             if self._memory_loader is not None:
                 memory = self._memory_loader.load()
-                system_instructions = memory.rendered or None
                 if memory.digest != self._last_memory_digest:
                     await self._sessions.append(
                         "memory_snapshot_changed",
@@ -113,7 +143,10 @@ class AgentApplication:
                     )
                     self._last_memory_digest = memory.digest
             if self._context_manager is not None:
-                status = self._context_manager.status(self._conversation.snapshot())
+                supplemental_characters = self._supplemental_characters(system_instructions)
+                status = self._context_manager.status(
+                    self._conversation.snapshot(), supplemental_characters
+                )
                 if status.level in {"soft", "hard"}:
                     try:
                         await self.compact_context(reason="auto")
@@ -122,7 +155,12 @@ class AgentApplication:
                             "Context compaction failed; continuing with the original context"
                         )
                 request_history = self._context_manager.project(self._conversation.snapshot())
-                if self._context_manager.status(self._conversation.snapshot()).level == "hard":
+                if (
+                    self._context_manager.status(
+                        self._conversation.snapshot(), supplemental_characters
+                    ).level
+                    == "hard"
+                ):
                     yield AgentFailed(message="Context remains above the safe request limit")
                     return
             else:
@@ -143,7 +181,11 @@ class AgentApplication:
 
             await self._sessions.append("assistant_exchange", response)
             if self._context_manager is not None:
-                self._context_manager.record_provider_usage(request_history, response.usage)
+                self._context_manager.record_provider_usage(
+                    request_history,
+                    response.usage,
+                    self._supplemental_characters(system_instructions),
+                )
             if response.tool_uses:
                 results = []
                 for call in response.tool_uses:

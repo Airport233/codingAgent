@@ -9,6 +9,7 @@ from rich.console import Console
 
 from coding_agent.cli import run_repl, write_console
 from coding_agent.domain import AssistantExchange, TextBlock, ThinkingBlock, UserExchange
+from coding_agent.events import WarningRaised
 from coding_agent.providers.fake import FakeProvider
 from coding_agent.runtime import RuntimeSettings, create_runtime
 
@@ -26,6 +27,7 @@ def test_runtime_settings_use_environment_without_exposing_private_values(tmp_pa
     )
 
     assert settings.model == "claude-example"
+    assert settings.model_key == "claude-example"
     assert settings.workspace == tmp_path.resolve()
     assert settings.data_root == (tmp_path / "data").resolve()
     assert "private-test-credential" not in repr(settings)
@@ -42,7 +44,10 @@ default_model = "local/claude-example"
 [providers.local]
 base_url = "https://example.invalid/anthropic"
 api_key_env = "LOCAL_PROVIDER_KEY"
-models = ["claude-example"]
+
+[providers.local.models.claude-example]
+context_window = 120000
+max_output_tokens = 6000
 """.strip(),
         encoding="utf-8",
     )
@@ -56,7 +61,22 @@ models = ["claude-example"]
     )
 
     assert settings.model == "claude-example"
+    assert settings.model_key == "local/claude-example"
     assert settings.sdk_base_url == "https://example.invalid/anthropic/"
+    assert settings.context_window == 120_000
+    assert settings.max_tokens == 6_000
+
+    overridden = RuntimeSettings.load(
+        workspace=tmp_path,
+        model=None,
+        environ={"LOCAL_PROVIDER_KEY": "private-test-credential"},
+        data_root=tmp_path / "data",
+        config_path=config_path,
+        context_window=64_000,
+        max_tokens=2_000,
+    )
+    assert overridden.context_window == 64_000
+    assert overridden.max_tokens == 2_000
 
 
 @pytest.mark.asyncio
@@ -108,7 +128,7 @@ async def test_runtime_resume_with_new_model_excludes_old_thinking_from_requests
     }
     first_settings = RuntimeSettings.from_environment(
         workspace=workspace,
-        model="first-model",
+        model="first/shared-model",
         environ=environment,
         data_root=tmp_path / "data",
     )
@@ -129,7 +149,7 @@ async def test_runtime_resume_with_new_model_excludes_old_thinking_from_requests
 
     second_settings = RuntimeSettings.from_environment(
         workspace=workspace,
-        model="second-model",
+        model="second/shared-model",
         environ=environment,
         data_root=tmp_path / "data",
     )
@@ -145,10 +165,11 @@ async def test_runtime_resume_with_new_model_excludes_old_thinking_from_requests
         ]
     )
     resumed_runtime = await create_runtime(second_settings, resume=True, provider=resumed_provider)
-    _ = [event async for event in resumed_runtime.application.run("second question")]
+    resumed_events = [event async for event in resumed_runtime.application.run("second question")]
     await resumed_runtime.aclose()
 
     prior_assistant = resumed_provider.requests[0][1]
+    assert any(isinstance(event, WarningRaised) for event in resumed_events)
     assert isinstance(prior_assistant, AssistantExchange)
     assert prior_assistant.blocks == (TextBlock("public answer"),)
 
@@ -168,6 +189,58 @@ async def test_runtime_resume_with_new_model_excludes_old_thinking_from_requests
     session_text = next((tmp_path / "data" / "sessions").rglob("*.jsonl")).read_text()
     assert "private reasoning" in session_text
     assert '"kind":"model_changed"' in session_text
+
+
+@pytest.mark.asyncio
+async def test_runtime_resume_restores_the_latest_compaction_checkpoint(tmp_path: Path) -> None:
+    settings = RuntimeSettings.from_environment(
+        workspace=tmp_path,
+        model="example-model",
+        environ={
+            "CODING_AGENT_BASE_URL": "https://example.invalid/anthropic",
+            "CODING_AGENT_API_KEY": "private-test-credential",
+        },
+        data_root=tmp_path / "data",
+    )
+    summary = (
+        "task_goal: preserve the active task\n"
+        "user_constraints: keep history durable\n"
+        "decisions: compact old exchanges\n"
+        "files_read: none\n"
+        "files_modified: none\n"
+        "commands_and_results: none\n"
+        "verification_status: pending\n"
+        "known_failures: none\n"
+        "pending_work: continue"
+    )
+    first_provider = FakeProvider(
+        [
+            *(
+                AssistantExchange((TextBlock(f"long answer {index} " * 50),), "end_turn")
+                for index in range(4)
+            ),
+            AssistantExchange((TextBlock(summary),), "end_turn"),
+        ]
+    )
+    runtime = await create_runtime(settings, provider=first_provider)
+    for index in range(4):
+        _ = [event async for event in runtime.application.run(f"long question {index} " * 50)]
+    checkpoint = await runtime.application.compact_context()
+    await runtime.aclose()
+    assert checkpoint is not None
+
+    resumed_provider = FakeProvider([AssistantExchange((TextBlock("resumed answer"),), "end_turn")])
+    resumed = await create_runtime(settings, resume=True, provider=resumed_provider)
+    _ = [event async for event in resumed.application.run("continue")]
+    await resumed.aclose()
+
+    request = resumed_provider.requests[0]
+    assert isinstance(request[0], UserExchange)
+    assert request[0].content == summary
+    assert all(
+        not isinstance(exchange, UserExchange) or "long question 0" not in exchange.content
+        for exchange in request
+    )
 
 
 @pytest.mark.asyncio

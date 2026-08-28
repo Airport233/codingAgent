@@ -31,6 +31,7 @@ class RuntimeSettings:
     workspace: Path
     data_root: Path
     model: str
+    model_key: str
     base_url: str = field(repr=False)
     api_key: str = field(repr=False)
     max_tokens: int = 4096
@@ -46,10 +47,10 @@ class RuntimeSettings:
         model: str | None,
         environ: Mapping[str, str] | None = None,
         data_root: Path | None = None,
-        max_tokens: int = 4096,
-        max_steps: int = 20,
-        context_window: int = 200_000,
-        auto_compact_ratio: float = 0.8,
+        max_tokens: int | None = None,
+        max_steps: int | None = None,
+        context_window: int | None = None,
+        auto_compact_ratio: float | None = None,
     ) -> RuntimeSettings:
         return cls.load(
             workspace=workspace,
@@ -72,10 +73,10 @@ class RuntimeSettings:
         environ: Mapping[str, str] | None = None,
         data_root: Path | None = None,
         config_path: Path | None = None,
-        max_tokens: int = 4096,
-        max_steps: int = 20,
-        context_window: int = 200_000,
-        auto_compact_ratio: float = 0.8,
+        max_tokens: int | None = None,
+        max_steps: int | None = None,
+        context_window: int | None = None,
+        auto_compact_ratio: float | None = None,
     ) -> RuntimeSettings:
         values = os.environ if environ is None else environ
         config = _read_config(config_path or user_config_path("codingAgent") / "config.toml")
@@ -89,6 +90,23 @@ class RuntimeSettings:
         selected_model = selected_model.strip()
 
         provider = _select_provider(config, selected_model)
+        model_id = selected_model.split("/", 1)[-1]
+        model_config = _select_model_config(provider, model_id)
+        resolved_max_tokens = _configured_int(
+            max_tokens, model_config.get("max_output_tokens"), 4096, "max output tokens"
+        )
+        resolved_max_steps = _configured_int(
+            max_steps, general.get("max_agent_steps"), 20, "max agent steps"
+        )
+        resolved_context_window = _configured_int(
+            context_window, model_config.get("context_window"), 200_000, "context window"
+        )
+        resolved_auto_ratio = _configured_float(
+            auto_compact_ratio,
+            general.get("auto_compact_ratio"),
+            0.8,
+            "auto compaction ratio",
+        )
         configured_url = values.get("CODING_AGENT_BASE_URL") or provider.get("base_url")
         if not isinstance(configured_url, str) or not configured_url.strip():
             raise RuntimeConfigurationError("Missing Provider Base URL")
@@ -100,9 +118,13 @@ class RuntimeSettings:
             raise RuntimeConfigurationError(
                 "Missing API key environment variable: CODING_AGENT_API_KEY"
             )
-        if max_tokens <= 0 or max_steps <= 0 or context_window <= max_tokens:
+        if (
+            resolved_max_tokens <= 0
+            or resolved_max_steps <= 0
+            or resolved_context_window <= resolved_max_tokens
+        ):
             raise RuntimeConfigurationError("Token and step limits must be positive")
-        if not 0 < auto_compact_ratio < 1:
+        if not 0 < resolved_auto_ratio < 1:
             raise RuntimeConfigurationError("Auto compaction ratio must be between zero and one")
         resolved_workspace = workspace.resolve()
         if not resolved_workspace.is_dir():
@@ -112,17 +134,17 @@ class RuntimeSettings:
         except ValueError as error:
             raise RuntimeConfigurationError(str(error)) from error
         selected_data_root = (data_root or user_data_path("codingAgent")).resolve()
-        model_id = selected_model.split("/", 1)[-1]
         return cls(
             workspace=resolved_workspace,
             data_root=selected_data_root,
             model=model_id,
+            model_key=selected_model,
             base_url=configured_url.strip(),
             api_key=credential,
-            max_tokens=max_tokens,
-            max_steps=max_steps,
-            context_window=context_window,
-            auto_compact_ratio=auto_compact_ratio,
+            max_tokens=resolved_max_tokens,
+            max_steps=resolved_max_steps,
+            context_window=resolved_context_window,
+            auto_compact_ratio=resolved_auto_ratio,
         )
 
     @property
@@ -169,19 +191,20 @@ async def create_runtime(
         initial_exchanges = recovered.conversation
 
     previous_model = recovered.model if recovered is not None else None
+    model_changed = previous_model is not None and previous_model != settings.model_key
     excluded_thinking_indices = (
         frozenset(
             index
             for index, exchange_model in enumerate(recovered.conversation_models)
-            if exchange_model is not None and exchange_model != settings.model
+            if exchange_model is not None and exchange_model != settings.model_key
         )
         if recovered is not None
         else frozenset()
     )
-    if previous_model != settings.model:
+    if previous_model != settings.model_key:
         await store.append(
             "model_changed",
-            {"previous": previous_model, "current": settings.model},
+            {"previous": previous_model, "current": settings.model_key},
         )
 
     client: AsyncAnthropic | None = None
@@ -220,6 +243,7 @@ async def create_runtime(
         memory_loader=ProjectMemoryLoader(project_root, settings.workspace),
         initial_exchanges=initial_exchanges,
         context_manager=context_manager,
+        context_reprojected=model_changed,
     )
     return AgentRuntime(application, store.session_id, client)
 
@@ -253,13 +277,36 @@ def _select_provider(config: Mapping[str, object], model: str) -> dict[str, obje
     matches = [
         _mapping(value)
         for value in providers.values()
-        if model in _string_list(_mapping(value).get("models"))
+        if model in _model_names(_mapping(value).get("models"))
     ]
     if len(matches) == 1:
         return matches[0]
     if len(providers) == 1:
         return _mapping(next(iter(providers.values())))
     return {}
+
+
+def _select_model_config(provider: Mapping[str, object], model_id: str) -> dict[str, object]:
+    models = provider.get("models")
+    if not isinstance(models, Mapping):
+        return {}
+    return _mapping(models.get(model_id))
+
+
+def _configured_int(explicit: int | None, configured: object, default: int, label: str) -> int:
+    value = explicit if explicit is not None else configured if configured is not None else default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise RuntimeConfigurationError(f"Configured {label} has an invalid type")
+    return value
+
+
+def _configured_float(
+    explicit: float | None, configured: object, default: float, label: str
+) -> float:
+    value = explicit if explicit is not None else configured if configured is not None else default
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RuntimeConfigurationError(f"Configured {label} has an invalid type")
+    return float(value)
 
 
 def _mapping(value: object) -> dict[str, object]:
@@ -270,3 +317,9 @@ def _string_list(value: object) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
     return tuple(item for item in value if isinstance(item, str))
+
+
+def _model_names(value: object) -> tuple[str, ...]:
+    if isinstance(value, Mapping):
+        return tuple(key for key in value if isinstance(key, str))
+    return _string_list(value)
