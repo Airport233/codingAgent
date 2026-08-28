@@ -428,7 +428,8 @@ class CodingAgentTui(App[None]):
 
     @on(TextArea.Changed, "#composer")
     def resize_composer(self, event: TextArea.Changed) -> None:
-        self.call_after_refresh(self._resize_composer, event.text_area)
+        composer = cast(PromptTextArea, event.text_area)
+        self.call_after_refresh(self._resize_composer, composer)
         self._sync_completion(event.text_area.text)
 
     @on(PromptTextArea.CompletionAction)
@@ -490,9 +491,8 @@ class CodingAgentTui(App[None]):
         if event.option_id is not None:
             await self._accept_completion(option_id=event.option_id)
 
-    def _resize_composer(self, composer: TextArea) -> None:
-        if isinstance(composer, PromptTextArea):
-            composer.resize_to_content()
+    def _resize_composer(self, composer: PromptTextArea) -> None:
+        composer.resize_to_content()
 
     def _sync_completion(self, value: str) -> None:
         if self._dismissed_completion_value == value:

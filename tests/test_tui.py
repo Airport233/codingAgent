@@ -133,6 +133,33 @@ async def test_composer_soft_wraps_long_input_instead_of_scrolling_horizontally(
         assert composer.size.height > 3
 
 
+async def test_inactive_completion_shortcuts_are_safe() -> None:
+    app = CodingAgentTui(
+        application_with_response(),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test():
+        composer = app.query_one("#composer", PromptTextArea)
+        assert composer.completion_active is False
+
+        composer.action_completion_dismiss()
+        composer.action_completion_accept()
+
+        assert composer.completion_active is False
+
+
+async def test_compaction_progress_can_finish_before_its_timer_starts() -> None:
+    progress = CompactionProgress()
+
+    progress.finish("Compaction skipped", "warning")
+
+    assert progress.has_class("warning")
+    assert "Compaction skipped" in str(progress.render())
+
+
 async def test_shift_enter_adds_newline_and_enter_submits_multiline_prompt() -> None:
     app = CodingAgentTui(
         application_with_response(),
@@ -236,10 +263,12 @@ async def test_slash_popup_filters_navigates_completes_and_dismisses() -> None:
 
         composer.value = "/"
         await pilot.pause()
+        await pilot.pause()
         assert popup.display is True
         assert choices.option_count >= 7
 
         composer.value = "/mo"
+        await pilot.pause()
         await pilot.pause()
         assert choices.option_count == 1
         assert choices.get_option_at_index(0).id == "/model"
@@ -290,6 +319,7 @@ async def test_slash_popup_allocates_visible_rows_for_every_command_match() -> N
             ("/t", ("/thinking",)),
         ):
             composer.value = prefix
+            await pilot.pause()
             await pilot.pause()
             assert (
                 tuple(
