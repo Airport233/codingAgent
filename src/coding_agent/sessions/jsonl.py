@@ -230,9 +230,7 @@ class JsonlSessionRepository:
                 return recovered
         return None
 
-    async def resume(
-        self, project_root: Path, session_id: str
-    ) -> RecoveredSession | None:
+    async def resume(self, project_root: Path, session_id: str) -> RecoveredSession | None:
         if not _SESSION_ID.fullmatch(session_id):
             raise ValueError("session_id contains unsupported characters")
         path = self._sessions_root / _project_key(project_root) / f"{session_id}.jsonl"

@@ -146,6 +146,10 @@ class PromptTextArea(TextArea):
         self.load_text(value)
         lines = value.split("\n")
         self.move_cursor((len(lines) - 1, len(lines[-1])))
+        self.resize_to_content()
+
+    def resize_to_content(self) -> None:
+        self.styles.height = max(3, min(self.wrapped_document.height + 2, 8))
 
     def action_submit(self) -> None:
         if self.completion_active:
@@ -215,9 +219,7 @@ class ResumeSessionScreen(Screen[str | None]):
         Binding("ctrl+c", "cancel", "Back", show=False),
     ]
 
-    def __init__(
-        self, sessions: tuple[SessionSummary, ...], *, current_session_id: str
-    ) -> None:
+    def __init__(self, sessions: tuple[SessionSummary, ...], *, current_session_id: str) -> None:
         super().__init__()
         self.sessions = sessions
         self.current_session_id = current_session_id
@@ -265,10 +267,7 @@ class ResumeSessionScreen(Screen[str | None]):
     def _option_label(self, session: SessionSummary) -> str:
         current = " · current" if session.session_id == self.current_session_id else ""
         compacted = " · compacted" if session.compacted else ""
-        return (
-            f"{session.title}  ·  {_display_time(session.updated_at)}"
-            f"{compacted}{current}"
-        )
+        return f"{session.title}  ·  {_display_time(session.updated_at)}{compacted}{current}"
 
     def _preview(self, index: int) -> str:
         if not self.sessions:
@@ -324,9 +323,7 @@ class ApprovalScreen(Screen[tuple[str, ApprovalDecision]]):
     @on(OptionList.OptionSelected, "#approval-options")
     def select_decision(self, event: OptionList.OptionSelected) -> None:
         if event.option_id in {"allow_once", "allow_session", "deny"}:
-            self.dismiss(
-                (self.request.request_id, cast(ApprovalDecision, event.option_id))
-            )
+            self.dismiss((self.request.request_id, cast(ApprovalDecision, event.option_id)))
 
     def action_deny(self) -> None:
         self.dismiss((self.request.request_id, "deny"))
@@ -494,7 +491,8 @@ class CodingAgentTui(App[None]):
             await self._accept_completion(option_id=event.option_id)
 
     def _resize_composer(self, composer: TextArea) -> None:
-        composer.styles.height = max(3, min(composer.wrapped_document.height + 2, 8))
+        if isinstance(composer, PromptTextArea):
+            composer.resize_to_content()
 
     def _sync_completion(self, value: str) -> None:
         if self._dismissed_completion_value == value:
@@ -935,9 +933,7 @@ class CodingAgentTui(App[None]):
                     )
                 )
             elif isinstance(block, RedactedThinkingBlock):
-                body = Static(
-                    "Provider-redacted thinking", markup=False, classes="thinking-body"
-                )
+                body = Static("Provider-redacted thinking", markup=False, classes="thinking-body")
                 await self._mount(
                     Collapsible(
                         body,

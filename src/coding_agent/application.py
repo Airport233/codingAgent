@@ -331,9 +331,7 @@ class AgentApplication:
                             continuation = ToolContinuationExchange(response, tuple(results))
                             self._conversation.exchanges.append(continuation)
                             await self._sessions.append("tool_continuation", continuation)
-                            await self._sessions.append(
-                                "turn_cancelled", {"phase": "approval"}
-                            )
+                            await self._sessions.append("turn_cancelled", {"phase": "approval"})
                             yield AgentCancelled(message="Approval cancelled")
                             return
                         finally:

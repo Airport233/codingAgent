@@ -237,9 +237,7 @@ async def create_runtime(
     if recovered is None:
         store = sessions.deferred_create(
             workspace_root,
-            initial_events=(
-                ("model_changed", {"previous": None, "current": settings.model_key}),
-            ),
+            initial_events=(("model_changed", {"previous": None, "current": settings.model_key}),),
         )
         initial_exchanges = ()
     else:

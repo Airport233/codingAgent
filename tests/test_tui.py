@@ -398,9 +398,7 @@ async def test_resume_is_explicitly_blocked_while_a_turn_is_running() -> None:
         raise AssertionError("resume callback must not run during an active turn")
 
     app = CodingAgentTui(
-        AgentApplication(
-            SlowProvider(), ToolDispatcher(ToolCatalog({})), InMemorySessionStore()
-        ),
+        AgentApplication(SlowProvider(), ToolDispatcher(ToolCatalog({})), InMemorySessionStore()),
         model="provider/model",
         workspace="/tmp/project",
         session_id="session-1",
@@ -721,9 +719,7 @@ async def test_manual_compaction_shows_indeterminate_progress_until_provider_fin
             del conversation, tools, system_instructions
             started.set()
             await release.wait()
-            yield ProviderResponseFinished(
-                AssistantExchange((TextBlock(summary),), "end_turn")
-            )
+            yield ProviderResponseFinished(AssistantExchange((TextBlock(summary),), "end_turn"))
 
     history: tuple[ConversationExchange, ...] = tuple(
         exchange
