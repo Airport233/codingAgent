@@ -148,8 +148,8 @@ async def run_repl(
                 write_output("Context management is unavailable.\n")
             else:
                 write_output(
-                    f"Context: {status.used_tokens}/{status.context_window} tokens "
-                    f"estimated ({status.used_tokens / status.context_window:.1%}, "
+                    f"Context estimate: {status.used_tokens}/{status.context_window} tokens "
+                    f"({status.used_tokens / status.context_window:.1%}, "
                     f"{status.level}); auto={status.soft_limit}, "
                     f"hard={status.hard_limit}"
                 )
@@ -157,6 +157,14 @@ async def run_repl(
                     write_output(f"; last provider input={status.last_provider_input_tokens} exact")
                 if status.model_projection_active:
                     write_output("; model-switch projection active")
+                checkpoint = application.context_checkpoint()
+                if checkpoint is not None:
+                    write_output(
+                        f"; last compaction={checkpoint.strategy}, "
+                        f"replaced {checkpoint.retained_from}, "
+                        f"retained {len(checkpoint.projected) - 1}, "
+                        f"estimate {checkpoint.before_tokens}->{checkpoint.after_tokens}"
+                    )
                 write_output("\n")
             continue
         if prompt == "/compact":
@@ -169,8 +177,10 @@ async def run_repl(
                 write_output("Context is too short to compact.\n")
             else:
                 write_output(
-                    f"Compacted context: {checkpoint.before_tokens} -> "
-                    f"{checkpoint.after_tokens} tokens.\n"
+                    f"Compacted context with {checkpoint.strategy} summary: estimated "
+                    f"{checkpoint.before_tokens} -> {checkpoint.after_tokens} tokens; "
+                    f"replaced {checkpoint.retained_from} exchanges, retained "
+                    f"{len(checkpoint.projected) - 1}.\n"
                 )
             continue
         if prompt.startswith("/"):

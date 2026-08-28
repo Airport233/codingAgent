@@ -10,12 +10,14 @@ from textual.widgets import Collapsible, OptionList
 
 import coding_agent.tui as tui_module
 from coding_agent.application import AgentApplication
+from coding_agent.context import ContextBudget, ContextManager, TokenEstimator
 from coding_agent.domain import (
     AssistantExchange,
     ConversationExchange,
     TextBlock,
     ThinkingBlock,
     ToolUseBlock,
+    UserExchange,
 )
 from coding_agent.providers.base import ProviderEvent
 from coding_agent.providers.fake import FakeProvider
@@ -489,6 +491,71 @@ async def test_tui_slash_commands_update_state_without_leaving_full_screen() -> 
         assert "provider/other" in str(app.query_one("#status-model").render())
         assert "session session-" in str(app.query_one("#status-session").render())
         assert "Started a new empty session." in str(app.query_one(".notice").render())
+
+
+async def test_manual_compaction_refreshes_context_and_reports_projection_details() -> None:
+    history: list[ConversationExchange] = []
+    for index in range(4):
+        history.extend(
+            (
+                UserExchange(f"old question {index} " * 60),
+                AssistantExchange((TextBlock(f"old answer {index} " * 60),), "end_turn"),
+            )
+        )
+    summary = (
+        "task_goal: continue the test\n"
+        "user_constraints: keep output short\n"
+        "decisions: none\n"
+        "files_read: none\n"
+        "files_modified: none\n"
+        "commands_and_results: none\n"
+        "verification_status: pending\n"
+        "known_failures: none\n"
+        "pending_work: continue"
+    )
+    context_manager = ContextManager(
+        ContextBudget(context_window=20_000, max_output_tokens=2_000),
+        TokenEstimator(),
+        retained_exchanges=2,
+    )
+    context_manager.record_provider_usage(history, {"input_tokens": 2_400})
+    application = AgentApplication(
+        FakeProvider([AssistantExchange((TextBlock(summary),), "end_turn")]),
+        ToolDispatcher(ToolCatalog({})),
+        InMemorySessionStore(),
+        initial_exchanges=history,
+        context_manager=context_manager,
+    )
+    app = CodingAgentTui(
+        application,
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        before = str(app.query_one("#status-context").render())
+        composer = app.query_one("#composer", PromptTextArea)
+        composer.value = "/compact"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        status = application.context_status()
+        assert status is not None
+        assert str(status.used_tokens) in str(app.query_one("#status-context").render())
+        assert str(app.query_one("#status-context").render()) != before
+        notice = str(list(app.query(".notice"))[-1].render())
+        assert "provider summary" in notice
+        assert "replaced 6 exchanges" in notice
+        assert "retained 2" in notice
+
+        composer.value = "/context"
+        await pilot.press("enter")
+        await pilot.pause()
+        context_notice = str(list(app.query(".notice"))[-1].render())
+        assert "Context estimate:" in context_notice
+        assert "last Provider input=2400 tokens exact" in context_notice
+        assert "Last compaction: provider summary" in context_notice
 
 
 async def test_ctrl_c_cancels_active_provider_without_closing_tui() -> None:

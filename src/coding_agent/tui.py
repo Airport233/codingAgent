@@ -418,7 +418,7 @@ class CodingAgentTui(App[None]):
                     self._tool_finished(event)
                 elif isinstance(event, ContextUsageChanged):
                     self.query_one("#status-context", Label).update(
-                        f"context {event.used_tokens}/{event.context_window} · {event.level}"
+                        f"context ~{event.used_tokens}/{event.context_window} · {event.level}"
                     )
                 elif isinstance(event, AgentFailed):
                     await self._notice(event.message, "error")
@@ -494,12 +494,26 @@ class CodingAgentTui(App[None]):
             await self.action_toggle_thinking()
         elif prompt == "/context":
             status = self.application.context_status()
-            message = (
-                "Context management is unavailable."
-                if status is None
-                else f"Context: {status.used_tokens}/{status.context_window} tokens "
-                f"({status.used_tokens / status.context_window:.1%}, {status.level})"
-            )
+            if status is None:
+                message = "Context management is unavailable."
+            else:
+                message = (
+                    f"Context estimate: {status.used_tokens}/{status.context_window} tokens "
+                    f"({status.used_tokens / status.context_window:.1%}, {status.level}); "
+                    f"auto={status.soft_limit}, hard={status.hard_limit}"
+                )
+                if status.last_provider_input_tokens is not None:
+                    message += (
+                        f"; last Provider input={status.last_provider_input_tokens} tokens exact"
+                    )
+                checkpoint = self.application.context_checkpoint()
+                if checkpoint is not None:
+                    message += (
+                        f"\nLast compaction: {checkpoint.strategy} summary, replaced "
+                        f"{checkpoint.retained_from} exchanges, retained "
+                        f"{len(checkpoint.projected) - 1}; estimate "
+                        f"{checkpoint.before_tokens} → {checkpoint.after_tokens}."
+                    )
             await self._notice(message, "info")
         elif prompt == "/compact":
             try:
@@ -507,12 +521,15 @@ class CodingAgentTui(App[None]):
             except Exception:
                 await self._notice("Context compaction failed; original context retained.", "error")
                 return
+            self._refresh_context_label()
             message = (
                 "Context is too short to compact."
                 if checkpoint is None
                 else (
-                    f"Compacted context: {checkpoint.before_tokens} → "
-                    f"{checkpoint.after_tokens} tokens."
+                    f"Compacted context with {checkpoint.strategy} summary: estimated "
+                    f"{checkpoint.before_tokens} → {checkpoint.after_tokens} tokens; "
+                    f"replaced {checkpoint.retained_from} exchanges, retained "
+                    f"{len(checkpoint.projected) - 1}."
                 )
             )
             await self._notice(message, "info")
@@ -544,7 +561,10 @@ class CodingAgentTui(App[None]):
         status = self.application.context_status()
         if status is None:
             return "context unavailable"
-        return f"context {status.used_tokens}/{status.context_window} · {status.level}"
+        return f"context ~{status.used_tokens}/{status.context_window} · {status.level}"
+
+    def _refresh_context_label(self) -> None:
+        self.query_one("#status-context", Label).update(self._context_label())
 
     def _reset_turn_widgets(self) -> None:
         self._assistant = None

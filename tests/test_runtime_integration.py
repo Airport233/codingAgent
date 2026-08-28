@@ -336,7 +336,9 @@ async def test_runtime_resume_restores_the_latest_compaction_checkpoint(tmp_path
 
     request = resumed_provider.requests[0]
     assert isinstance(request[0], UserExchange)
-    assert request[0].content == summary
+    assert request[0].content.startswith("<coding-agent-context-checkpoint>")
+    assert "historical background, not a new user request" in request[0].content
+    assert summary in request[0].content
     assert all(
         not isinstance(exchange, UserExchange) or "long question 0" not in exchange.content
         for exchange in request
@@ -401,9 +403,9 @@ async def test_repl_accepts_multiple_turns_and_compacts_context(tmp_path: Path) 
     assert provider.request_count == 5
     assert "answer one" in "".join(output)
     assert "answer four" in "".join(output)
-    assert "Context:" in "".join(output)
+    assert "Context estimate:" in "".join(output)
     assert "%" in "".join(output)
-    assert "Compacted context:" in "".join(output)
+    assert "Compacted context with provider summary:" in "".join(output)
 
 
 @pytest.mark.asyncio

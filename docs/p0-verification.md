@@ -45,14 +45,14 @@ Submit the task from `.tmp/agent-acceptance-manual/TASK.md`, then exercise `/thi
 `/compact`, `/model`, `/clear`, and `/exit`. Never place Provider credentials or private endpoints
 in the command transcript.
 
-## Open manual findings
+## Manual findings
 
 Recorded on 2026-08-28 for follow-up on `feature/cli-hardening`:
 
 - In the tested macOS terminal, copy and paste currently work through `Ctrl+C`/`Ctrl+V`, but the
   conventional `Command+C`/`Command+V` behavior is not yet verified as working end to end.
-- The TUI context label is refreshed before a Provider request, but not after the final assistant
-  exchange or a manual `/compact`; it can therefore lag behind the value recomputed by `/context`.
-- Manual compaction does install and use a projected history, but a Provider-generated summary is
-  not explicitly marked as a synthetic compaction summary for the next model. A model's answer to
-  questions about whether it saw a summary is therefore not reliable evidence of the request shape.
+- Resolved on `feature/cli-hardening`: the TUI context label now refreshes after the final
+  assistant exchange and manual `/compact`, and labels its current-context value as an estimate.
+- Resolved on `feature/cli-hardening`: projected history now wraps the summary in an explicit
+  codingAgent-generated checkpoint marker. Request-shape tests, rather than model self-reporting,
+  remain the acceptance evidence for compaction.

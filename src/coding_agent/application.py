@@ -81,6 +81,9 @@ class AgentApplication:
             self._supplemental_characters(system_instructions),
         )
 
+    def context_checkpoint(self) -> CompactionCheckpoint | None:
+        return None if self._context_manager is None else self._context_manager.checkpoint
+
     async def compact_context(self, reason: str = "manual") -> CompactionCheckpoint | None:
         if self._context_manager is None:
             return None
@@ -332,6 +335,9 @@ class AgentApplication:
                 continue
 
             self._conversation.exchanges.append(response)
+            context_update = self._context_usage_changed(system_instructions)
+            if context_update is not None:
+                yield context_update
             if response.stop_reason == "end_turn":
                 await self._sessions.append("turn_completed", {})
                 yield AgentCompleted(text=response.text)
@@ -344,6 +350,19 @@ class AgentApplication:
         message = "Maximum agent steps reached"
         await self._sessions.append("turn_failed", {"message": message})
         yield AgentFailed(message=message)
+
+    def _context_usage_changed(self, system_instructions: str | None) -> ContextUsageChanged | None:
+        if self._context_manager is None:
+            return None
+        status = self._context_manager.status(
+            self._conversation.snapshot(),
+            self._supplemental_characters(system_instructions),
+        )
+        return ContextUsageChanged(
+            used_tokens=status.used_tokens,
+            context_window=status.context_window,
+            level=status.level,
+        )
 
     def _redacted_text(self, value: object) -> str:
         redacted = self._display_redactor(str(value))

@@ -17,21 +17,21 @@ from coding_agent.domain import (
     ToolUseBlock,
     UserExchange,
 )
-from coding_agent.events import AgentFailed, WarningRaised
+from coding_agent.events import AgentFailed, ContextUsageChanged, WarningRaised
 from coding_agent.providers.fake import FakeProvider
 from coding_agent.sessions.memory import InMemorySessionStore
 from coding_agent.tools.catalog import ToolCatalog
 from coding_agent.tools.dispatcher import ToolDispatcher
 
 
-def exchanges():
+def exchanges(repetitions: int = 30):
     tool_assistant = AssistantExchange(
         (ToolUseBlock("call-1", "read_file", {"path": "a.py"}),),
         "tool_use",
     )
     return (
-        UserExchange("old task " * 30),
-        AssistantExchange((TextBlock("old answer " * 30),), "end_turn"),
+        UserExchange("old task " * repetitions),
+        AssistantExchange((TextBlock("old answer " * repetitions),), "end_turn"),
         ToolContinuationExchange(
             tool_assistant,
             (ToolResultBlock("call-1", "1: content", False),),
@@ -125,7 +125,7 @@ def test_deterministic_compaction_keeps_complete_recent_exchanges() -> None:
         TokenEstimator(),
         retained_exchanges=2,
     )
-    history = exchanges()
+    history = exchanges(80)
 
     candidate = manager.prepare(history, reason="manual")
 
@@ -133,11 +133,13 @@ def test_deterministic_compaction_keeps_complete_recent_exchanges() -> None:
     assert candidate.retained_from == 3
     assert candidate.projected[-2:] == history[-2:]
     assert isinstance(candidate.projected[0], UserExchange)
-    assert "context_summary_version: 1" in candidate.projected[0].content
-    assert "task_goal: User: old task" not in candidate.projected[0].content
-    assert "task_goal: old task" in candidate.projected[0].content
-    assert "files_read: a.py" in candidate.projected[0].content
-    assert "commands_and_results: read_file" in candidate.projected[0].content
+    assert candidate.projected[0].content.startswith("<coding-agent-context-checkpoint>")
+    assert "historical background, not a new user request" in candidate.projected[0].content
+    assert "context_summary_version: 1" in candidate.summary
+    assert "task_goal: User: old task" not in candidate.summary
+    assert "task_goal: old task" in candidate.summary
+    assert "files_read: a.py" in candidate.summary
+    assert "commands_and_results: read_file" in candidate.summary
     assert all(not isinstance(item, ToolContinuationExchange) for item in candidate.projected[:1])
 
 
@@ -159,12 +161,13 @@ async def test_compaction_installs_only_after_checkpoint_is_durable() -> None:
         TokenEstimator(),
         retained_exchanges=2,
     )
-    history = exchanges()
+    history = exchanges(80)
     store = RecordingStore()
 
     checkpoint = await manager.compact(history, reason="manual", persist=store.append)
 
     assert checkpoint is not None
+    assert checkpoint.strategy == "deterministic"
     assert manager.project(history) == checkpoint.projected
     assert [kind for kind, _payload in store.records] == [
         "compaction_started",
@@ -198,13 +201,14 @@ async def test_invalid_provider_summary_uses_independent_deterministic_fallback(
         return "not a structured summary"
 
     checkpoint = await manager.compact(
-        exchanges(),
+        exchanges(80),
         reason="manual",
         persist=store.append,
         summarize=invalid_summary,
     )
 
     assert checkpoint is not None
+    assert checkpoint.strategy == "deterministic"
     assert "strategy: deterministic" in checkpoint.summary
     assert [kind for kind, _payload in store.records] == [
         "compaction_started",
@@ -275,9 +279,40 @@ def test_checkpoint_can_be_restored_against_replayed_history() -> None:
 
     assert manager.project(history) == restored.projected
     assert restored.projected[-2:] == history[-2:]
+    assert restored.strategy == "legacy"
 
     with pytest.raises(ValueError, match="Invalid compaction checkpoint"):
         manager.restore(history, {"retained_from": 99})
+
+
+@pytest.mark.asyncio
+async def test_completed_turn_emits_context_usage_for_the_updated_history() -> None:
+    provider = FakeProvider(
+        [
+            AssistantExchange(
+                (TextBlock("a substantially longer response " * 20),),
+                "end_turn",
+                {"input_tokens": 24},
+            )
+        ]
+    )
+    manager = ContextManager(
+        ContextBudget(context_window=2_000, max_output_tokens=200),
+        TokenEstimator(),
+    )
+    application = AgentApplication(
+        provider,
+        ToolDispatcher(ToolCatalog({})),
+        InMemorySessionStore(),
+        context_manager=manager,
+    )
+
+    events = [event async for event in application.run("short request")]
+    updates = [event for event in events if isinstance(event, ContextUsageChanged)]
+
+    assert len(updates) == 2
+    assert updates[-1].used_tokens == application.context_status().used_tokens
+    assert updates[-1].used_tokens > updates[0].used_tokens
 
 
 @pytest.mark.asyncio

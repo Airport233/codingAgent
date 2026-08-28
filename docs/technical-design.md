@@ -303,12 +303,15 @@ expected_file_hash
 
 - 精确值优先使用 Provider 返回的 usage。
 - 请求前用本地估算器计算文本、工具 schema 和历史压力。
+- 状态栏显示的是“下一次请求的有效上下文估算”，用 `~` 标识；Provider 返回的上次输入 token 另行显示为 exact，不混用两种口径。
 - 估算器分别统计 ASCII、CJK、JSON 和内容块开销，再用实际 usage 更新每个 Provider/模型的校准系数。
 - 不使用 tiktoken 假装精确计算 DeepSeek 或内部模型 token。
 - 自动压缩阈值和硬保护阈值按模型配置。
 - Provider 报上下文超限时，执行一次强制压缩并最多重试一次。
 
 压缩不得依赖百炼或 Anthropic 的服务端上下文管理功能。
+
+压缩 checkpoint 在本地以独立状态管理：JSONL 继续保留原始会话，模型请求则投影为“明确标识的历史摘要 + 未压缩的近期 exchange”。摘要标记同时说明其只是背景，不是新的用户指令。
 
 ## 11. 会话存储技术方案
 
@@ -413,6 +416,8 @@ feature/cli-hardening
 
 - Codex `94311d447587411789533c47601fd8bc9d81eb48`：[`chat_composer_history.rs`](https://github.com/openai/codex/blob/94311d447587411789533c47601fd8bc9d81eb48/codex-rs/tui/src/bottom_pane/chat_composer_history.rs)，Apache-2.0；
 - OpenCode `755ebdb94ee755a9d5691e47af2c16f56696996e`：[`history.ts`](https://github.com/anomalyco/opencode/blob/755ebdb94ee755a9d5691e47af2c16f56696996e/packages/app/src/components/prompt-input/history.ts)，MIT。
+
+本项目的压缩 checkpoint 语义和 usage 口径参考 OpenCode `755ebdb94ee755a9d5691e47af2c16f56696996e` 的 [`compaction.ts`](https://github.com/anomalyco/opencode/blob/755ebdb94ee755a9d5691e47af2c16f56696996e/packages/core/src/session/compaction.ts)、[`to-llm-message.ts`](https://github.com/anomalyco/opencode/blob/755ebdb94ee755a9d5691e47af2c16f56696996e/packages/core/src/session/runner/to-llm-message.ts) 和 [`session-context-metrics.ts`](https://github.com/anomalyco/opencode/blob/755ebdb94ee755a9d5691e47af2c16f56696996e/packages/app/src/components/session/session-context-metrics.ts)，MIT。仅借鉴“原始历史/有效投影分离”、“checkpoint 显式标记”和“估算/精确 usage 分口径”的设计原则，本项目仍使用自行实现的 Python 状态机和数据结构。
 
 ## 15. 技术完成标准
 
