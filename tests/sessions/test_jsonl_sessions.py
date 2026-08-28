@@ -95,6 +95,9 @@ async def test_jsonl_round_trip_preserves_raw_blocks_usage_and_tool_metadata(
     assert recovered.conversation == (user, continuation, final)
     assert recovered.warnings == ()
     assert recovered.compaction == checkpoint
+    assert len(recovered.compactions) == 1
+    assert recovered.compactions[0].exchange_index == 3
+    assert recovered.compactions[0].payload == checkpoint
 
 
 @pytest.mark.asyncio

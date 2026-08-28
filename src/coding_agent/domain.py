@@ -91,3 +91,11 @@ class Conversation:
 
     def snapshot(self) -> tuple[ConversationExchange, ...]:
         return tuple(self.exchanges)
+
+
+@dataclass(frozen=True, slots=True)
+class CompactionRecord:
+    """A durable compaction event positioned within the unprojected transcript."""
+
+    exchange_index: int
+    payload: dict[str, object]

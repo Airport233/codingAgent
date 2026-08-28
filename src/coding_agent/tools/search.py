@@ -41,7 +41,7 @@ class CodeSearchTool:
         visible = matches[: parsed.max_results]
         if truncated:
             visible.append(f"[results truncated at {parsed.max_results} matches]")
-        return ToolOutput(content="\n".join(visible))
+        return ToolOutput(content="\n".join(visible) or "No matches.")
 
     def _search_with_python(self, request: CodeSearchInput) -> list[str]:
         flags = 0 if request.case_sensitive else re.IGNORECASE

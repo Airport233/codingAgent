@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import ClassVar, Literal
@@ -12,11 +13,25 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
+from textual.timer import Timer
 from textual.widgets import Collapsible, Footer, Label, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 from textual.worker import Worker
 
 from coding_agent.application import AgentApplication
+from coding_agent.domain import (
+    AssistantExchange,
+    CompactionRecord,
+    ConversationExchange,
+    RedactedThinkingBlock,
+    TextBlock,
+    ThinkingBlock,
+    ToolContinuationExchange,
+    ToolResultBlock,
+    ToolUseBlock,
+    UnknownProviderBlock,
+    UserExchange,
+)
 from coding_agent.events import (
     AgentCancelled,
     AgentCompleted,
@@ -140,6 +155,34 @@ class PromptTextArea(TextArea):
             self.screen.focus_next()
 
 
+class CompactionProgress(Static):
+    """Indeterminate progress display for a provider operation with no percentage."""
+
+    FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+    def __init__(self) -> None:
+        super().__init__("", markup=False, classes="message notice compaction-progress running")
+        self._started = time.monotonic()
+        self._frame = 0
+        self._timer: Timer | None = None
+
+    def on_mount(self) -> None:
+        self._tick()
+        self._timer = self.set_interval(0.1, self._tick)
+
+    def _tick(self) -> None:
+        elapsed = int(time.monotonic() - self._started)
+        self.update(f"{self.FRAMES[self._frame]} Compacting context… {elapsed}s")
+        self._frame = (self._frame + 1) % len(self.FRAMES)
+
+    def finish(self, message: str, kind: str = "info") -> None:
+        if self._timer is not None:
+            self._timer.pause()
+        self.remove_class("running")
+        self.add_class(kind)
+        self.update(message)
+
+
 class CodingAgentTui(App[None]):
     CSS_PATH = "tui.tcss"
     TITLE = "codingAgent"
@@ -175,7 +218,7 @@ class CodingAgentTui(App[None]):
         self._assistant_text = ""
         self._thinking: tuple[Collapsible, Static] | None = None
         self._thinking_text = ""
-        self._tools: dict[str, tuple[Collapsible, Static, str]] = {}
+        self._tools: dict[str, tuple[Collapsible, Static, str, str]] = {}
         self._completion_mode: Literal["commands", "models"] | None = None
         self._completion_matches: list[str] = []
         self._dismissed_completion_value: str | None = None
@@ -203,8 +246,9 @@ class CodingAgentTui(App[None]):
         )
         yield Footer()
 
-    def on_mount(self) -> None:
+    async def on_mount(self) -> None:
         self.query_one("#completion-popup", Vertical).display = False
+        await self._render_recovered_history()
         self.query_one("#composer", PromptTextArea).focus()
 
     @on(PromptTextArea.Submitted, "#composer")
@@ -434,7 +478,7 @@ class CodingAgentTui(App[None]):
             self.query_one("#composer", PromptTextArea).focus()
 
     async def _tool_started(self, event: ToolStarted) -> None:
-        details = json.dumps(event.arguments, ensure_ascii=False, indent=2)
+        details = _tool_arguments(event.arguments)
         body = Static(details, markup=False, classes="tool-body")
         panel = Collapsible(
             body,
@@ -442,18 +486,18 @@ class CodingAgentTui(App[None]):
             collapsed=True,
             classes="tool-card running",
         )
-        self._tools[event.call_id] = (panel, body, _tool_title(event))
+        self._tools[event.call_id] = (panel, body, _tool_title(event), details)
         await self._mount(panel)
 
     def _tool_finished(self, event: ToolFinished) -> None:
         item = self._tools.get(event.call_id)
         if item is None:
             return
-        panel, body, title = item
+        panel, body, title, details = item
         panel.title = f"{'✓' if not event.is_error else '✕'} {title} · {event.status}"
         panel.remove_class("running")
         panel.add_class("failed" if event.is_error else "succeeded")
-        body.update(event.content or "(no output)")
+        body.update(_tool_body(details, event.content))
 
     async def _command(self, prompt: str) -> None:
         if prompt == "/help":
@@ -516,11 +560,18 @@ class CodingAgentTui(App[None]):
                     )
             await self._notice(message, "info")
         elif prompt == "/compact":
+            progress = CompactionProgress()
+            await self._mount(progress)
+            composer = self.query_one("#composer", PromptTextArea)
+            composer.disabled = True
             try:
                 checkpoint = await self.application.compact_context()
             except Exception:
-                await self._notice("Context compaction failed; original context retained.", "error")
+                progress.finish("Context compaction failed; original context retained.", "error")
                 return
+            finally:
+                composer.disabled = False
+                composer.focus()
             self._refresh_context_label()
             message = (
                 "Context is too short to compact."
@@ -532,7 +583,7 @@ class CodingAgentTui(App[None]):
                     f"{len(checkpoint.projected) - 1}."
                 )
             )
-            await self._notice(message, "info")
+            progress.finish(message)
         elif prompt == "/exit":
             await self.action_quit_agent()
         else:
@@ -561,7 +612,8 @@ class CodingAgentTui(App[None]):
         status = self.application.context_status()
         if status is None:
             return "context unavailable"
-        return f"context ~{status.used_tokens}/{status.context_window} · {status.level}"
+        compacted = " · compacted" if self.application.context_checkpoint() is not None else ""
+        return f"context ~{status.used_tokens}/{status.context_window} · {status.level}{compacted}"
 
     def _refresh_context_label(self) -> None:
         self.query_one("#status-context", Label).update(self._context_label())
@@ -577,6 +629,121 @@ class CodingAgentTui(App[None]):
         """Make later text render after the event that ended this segment."""
         self._assistant = None
         self._assistant_text = ""
+
+    async def _render_recovered_history(self) -> None:
+        history = self.application.conversation_history()
+        if not history:
+            return
+        checkpoint = self.application.context_checkpoint()
+        compactions_by_index: dict[int, list[CompactionRecord]] = {}
+        for record in self.application.compaction_history():
+            compactions_by_index.setdefault(record.exchange_index, []).append(record)
+        self._prompt_history.extend(
+            exchange.content for exchange in history if isinstance(exchange, UserExchange)
+        )
+        for index, exchange in enumerate(history):
+            for record in compactions_by_index.get(index, ()):
+                await self._mount_compaction_record(record)
+            await self._render_recovered_exchange(exchange)
+        for record in compactions_by_index.get(len(history), ()):
+            await self._mount_compaction_record(record)
+        if checkpoint is not None:
+            await self._mount(
+                Static(
+                    "Resumed full transcript · compacted model context is active; "
+                    "scroll up to view the boundary.",
+                    markup=False,
+                    classes="message notice resume-status",
+                )
+            )
+
+    async def _mount_compaction_record(self, record: CompactionRecord) -> None:
+        payload = record.payload
+        strategy = payload.get("strategy", "legacy")
+        before = payload.get("before_tokens", "?")
+        after = payload.get("after_tokens", "?")
+        replaced = payload.get("retained_from", "?")
+        await self._mount(
+            Static(
+                f"Context compacted here · {strategy} summary · {before} → {after} tokens · "
+                f"replaced first {replaced} exchanges. Original messages remain visible.",
+                markup=False,
+                classes="message context-boundary",
+            )
+        )
+
+    async def _render_recovered_exchange(self, exchange: ConversationExchange) -> None:
+        if isinstance(exchange, UserExchange):
+            await self._mount(
+                Static(exchange.content, markup=False, classes="message user-message")
+            )
+            return
+        if isinstance(exchange, ToolContinuationExchange):
+            await self._render_recovered_assistant(exchange.assistant, exchange.results)
+            return
+        await self._render_recovered_assistant(exchange, ())
+
+    async def _render_recovered_assistant(
+        self,
+        exchange: AssistantExchange,
+        results: tuple[ToolResultBlock, ...],
+    ) -> None:
+        result_by_id = {result.tool_use_id: result for result in results}
+        for block in exchange.blocks:
+            if isinstance(block, TextBlock) and block.text:
+                await self._mount(
+                    Static(block.text, markup=False, classes="message assistant-message")
+                )
+            elif isinstance(block, ThinkingBlock):
+                body = Static(block.thinking or "(empty)", markup=False, classes="thinking-body")
+                await self._mount(
+                    Collapsible(
+                        body,
+                        title="Thinking · recovered",
+                        collapsed=not self.thinking_visible,
+                        classes="thinking-card",
+                    )
+                )
+            elif isinstance(block, RedactedThinkingBlock):
+                body = Static(
+                    "Provider-redacted thinking", markup=False, classes="thinking-body"
+                )
+                await self._mount(
+                    Collapsible(
+                        body,
+                        title="Thinking · redacted",
+                        collapsed=True,
+                        classes="thinking-card",
+                    )
+                )
+            elif isinstance(block, ToolUseBlock):
+                await self._render_recovered_tool(block, result_by_id.get(block.call_id))
+            elif isinstance(block, UnknownProviderBlock):
+                await self._mount(
+                    Static(
+                        f"Recovered unsupported provider block: {block.block_type}",
+                        markup=False,
+                        classes="message notice warning",
+                    )
+                )
+
+    async def _render_recovered_tool(
+        self, call: ToolUseBlock, result: ToolResultBlock | None
+    ) -> None:
+        started = ToolStarted(call.call_id, call.name, call.input)
+        title = _tool_title(started)
+        details = _tool_arguments(call.input)
+        content = "interrupted before result" if result is None else result.content
+        body = Static(_tool_body(details, content), markup=False, classes="tool-body")
+        failed = result is None or result.is_error
+        status = "interrupted" if result is None else ("error" if result.is_error else "done")
+        panel = Collapsible(
+            body,
+            title=f"{'✕' if failed else '✓'} {title} · {status}",
+            collapsed=True,
+            classes="tool-card failed" if failed else "tool-card succeeded",
+        )
+        await self._mount(panel)
 
     async def action_toggle_thinking(self) -> None:
         self.thinking_visible = not self.thinking_visible
@@ -609,7 +776,47 @@ def _tool_title(event: ToolStarted) -> str:
         cwd = event.arguments.get("cwd", ".")
         return f"shell [{cwd}] $ {command}" if isinstance(command, str) else "shell"
     path = event.arguments.get("path")
-    return f"{event.tool_name} · {path}" if isinstance(path, str) else event.tool_name
+    if isinstance(path, str):
+        if event.tool_name == "edit_file":
+            start = event.arguments.get("start_line")
+            end = event.arguments.get("end_line")
+            return f"edit_file · {path}:{start}-{end}"
+        if event.tool_name == "read_file":
+            start = event.arguments.get("start_line", 1)
+            end = event.arguments.get("end_line")
+            suffix = f":{start}-{end}" if end is not None else f":{start}-end"
+            return f"read_file · {path}{suffix}"
+        return f"{event.tool_name} · {path}"
+    if event.tool_name == "code_search":
+        query = event.arguments.get("query")
+        if isinstance(query, str):
+            return f"code_search · {_preview_text(query, 80)}"
+    return event.tool_name
+
+
+def _tool_arguments(arguments: dict[str, object]) -> str:
+    return "Input:\n" + json.dumps(_preview_value(arguments), ensure_ascii=False, indent=2)
+
+
+def _tool_body(arguments: str, result: str) -> str:
+    return f"{arguments}\n\nResult:\n{_preview_text(result or '(no output)', 12_000)}"
+
+
+def _preview_value(value: object) -> object:
+    if isinstance(value, str):
+        return _preview_text(value, 4_000)
+    if isinstance(value, dict):
+        return {str(key): _preview_value(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_preview_value(child) for child in value[:100]]
+    return value
+
+
+def _preview_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    omitted = len(value) - limit
+    return f"{value[:limit]}\n… [{omitted} characters omitted from display]"
 
 
 async def _copy_to_macos_clipboard(text: str) -> None:

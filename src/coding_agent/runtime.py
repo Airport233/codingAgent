@@ -276,6 +276,7 @@ async def create_runtime(
         context_manager=context_manager,
         context_reprojected=model_changed,
         display_redactor=redactor.redact,
+        initial_compactions=recovered.compactions if recovered is not None else (),
     )
     return AgentRuntime(application, store.session_id, client)
 

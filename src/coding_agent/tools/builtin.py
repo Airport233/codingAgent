@@ -70,7 +70,7 @@ class ReadFileTool:
             f"{line_number}: {line}"
             for line_number, line in enumerate(selected, start=parsed.start_line)
         )
-        return ToolOutput(content=numbered)
+        return ToolOutput(content=numbered or "(file is empty)")
 
 
 class BuiltinToolSource:

@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from coding_agent.context import CompactionCheckpoint, ContextManager, ContextStatus
 from coding_agent.domain import (
     AssistantExchange,
+    CompactionRecord,
     Conversation,
     ConversationExchange,
     RedactedThinkingBlock,
@@ -53,6 +54,7 @@ class AgentApplication:
         context_manager: ContextManager | None = None,
         context_reprojected: bool = False,
         display_redactor: Callable[[object], object] | None = None,
+        initial_compactions: Sequence[CompactionRecord] = (),
     ) -> None:
         self._provider = provider
         self._dispatcher = dispatcher
@@ -64,6 +66,7 @@ class AgentApplication:
         self._context_manager = context_manager
         self._context_reprojected = context_reprojected
         self._display_redactor = display_redactor or (lambda value: value)
+        self._compaction_history = tuple(initial_compactions)
         self._closed = False
 
     async def close_session(self) -> None:
@@ -83,6 +86,14 @@ class AgentApplication:
 
     def context_checkpoint(self) -> CompactionCheckpoint | None:
         return None if self._context_manager is None else self._context_manager.checkpoint
+
+    def conversation_history(self) -> tuple[ConversationExchange, ...]:
+        """Return the durable, unprojected transcript for read-only presentation."""
+        return self._conversation.snapshot()
+
+    def compaction_history(self) -> tuple[CompactionRecord, ...]:
+        """Return durable compaction events with their original transcript positions."""
+        return self._compaction_history
 
     async def compact_context(self, reason: str = "manual") -> CompactionCheckpoint | None:
         if self._context_manager is None:

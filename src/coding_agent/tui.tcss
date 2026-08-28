@@ -55,6 +55,14 @@ Screen {
     border-left: thick #fbbf24;
 }
 
+.context-boundary {
+    color: #c4b5fd;
+    background: #17142b;
+    border-top: solid #7c3aed;
+    border-bottom: solid #7c3aed;
+    text-align: center;
+}
+
 .succeeded {
     border-left: thick #34d399;
 }

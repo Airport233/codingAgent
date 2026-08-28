@@ -13,19 +13,22 @@ from coding_agent.application import AgentApplication
 from coding_agent.context import ContextBudget, ContextManager, TokenEstimator
 from coding_agent.domain import (
     AssistantExchange,
+    CompactionRecord,
     ConversationExchange,
     TextBlock,
     ThinkingBlock,
+    ToolContinuationExchange,
+    ToolResultBlock,
     ToolUseBlock,
     UserExchange,
 )
-from coding_agent.providers.base import ProviderEvent
+from coding_agent.providers.base import ProviderEvent, ProviderResponseFinished
 from coding_agent.providers.fake import FakeProvider
 from coding_agent.sessions.memory import InMemorySessionStore
 from coding_agent.tools.base import ToolOutput, ToolSpec
 from coding_agent.tools.catalog import ToolCatalog
 from coding_agent.tools.dispatcher import ToolDispatcher
-from coding_agent.tui import CliTransition, CodingAgentTui, PromptTextArea
+from coding_agent.tui import CliTransition, CodingAgentTui, CompactionProgress, PromptTextArea
 
 pytestmark = pytest.mark.asyncio
 
@@ -387,7 +390,169 @@ async def test_tui_renders_collapsible_thinking_and_completed_tool_card() -> Non
         assert "uv run pytest" in tool.title
         assert "[tests]" in tool.title
         assert "done" in tool.title
+        assert '"command": "uv run pytest"' in str(tool.query_one(".tool-body").render())
+        assert "Result:" in str(tool.query_one(".tool-body").render())
         assert "all green" in str(tool.query_one(".tool-body").render())
+
+
+async def test_tui_replays_full_history_with_compaction_boundary_and_tool_inputs() -> None:
+    tool_call = ToolUseBlock(
+        "write-1",
+        "write_file",
+        {"path": "hello.py", "content": "print('visible after resume')\n"},
+    )
+    history: tuple[ConversationExchange, ...] = (
+        UserExchange("old request that the model no longer receives verbatim"),
+        ToolContinuationExchange(
+            AssistantExchange((TextBlock("Creating the file."), tool_call), "tool_use"),
+            (ToolResultBlock("write-1", "Created hello.py (30 bytes)", False),),
+        ),
+        UserExchange("recent request"),
+        AssistantExchange((TextBlock("recent answer"),), "end_turn"),
+    )
+    summary = (
+        "task_goal: create hello.py\n"
+        "user_constraints: preserve visible history\n"
+        "decisions: wrote the file\n"
+        "files_read: none\n"
+        "files_modified: hello.py\n"
+        "commands_and_results: write succeeded\n"
+        "verification_status: pending\n"
+        "known_failures: none\n"
+        "pending_work: continue"
+    )
+    manager = ContextManager(
+        ContextBudget(context_window=20_000, max_output_tokens=2_000),
+        TokenEstimator(),
+        retained_exchanges=2,
+    )
+    manager.restore(
+        history,
+        {
+            "reason": "manual",
+            "strategy": "provider",
+            "retained_from": 2,
+            "before_tokens": 1_000,
+            "after_tokens": 500,
+            "summary": summary,
+        },
+    )
+    application = AgentApplication(
+        FakeProvider([]),
+        ToolDispatcher(ToolCatalog({})),
+        InMemorySessionStore(),
+        initial_exchanges=history,
+        context_manager=manager,
+        initial_compactions=(
+            CompactionRecord(
+                2,
+                {
+                    "strategy": "provider",
+                    "retained_from": 2,
+                    "before_tokens": 1_000,
+                    "after_tokens": 500,
+                },
+            ),
+        ),
+    )
+    app = CodingAgentTui(
+        application,
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="resumed-session",
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        conversation = app.query_one("#conversation")
+        rendered = "\n".join(str(child.render()) for child in conversation.children)
+        assert "old request that the model no longer receives verbatim" in rendered
+        assert "recent request" in rendered
+        assert "recent answer" in rendered
+        assert "Context compacted here" in rendered
+        assert "Resumed full transcript" in rendered
+        assert "compacted" in str(app.query_one("#status-context").render())
+        tool_body = str(app.query_one(".tool-body").render())
+        assert "print('visible after resume')" in tool_body
+        assert "Created hello.py (30 bytes)" in tool_body
+
+        composer = app.query_one("#composer", PromptTextArea)
+        await pilot.press("up")
+        assert composer.value == "recent request"
+        await pilot.press("up")
+        assert composer.value == "old request that the model no longer receives verbatim"
+
+
+async def test_manual_compaction_shows_indeterminate_progress_until_provider_finishes() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    summary = (
+        "task_goal: continue\n"
+        "user_constraints: none\n"
+        "decisions: none\n"
+        "files_read: none\n"
+        "files_modified: none\n"
+        "commands_and_results: none\n"
+        "verification_status: pending\n"
+        "known_failures: none\n"
+        "pending_work: continue"
+    )
+
+    class BlockingSummaryProvider:
+        async def stream(
+            self,
+            conversation: tuple[ConversationExchange, ...],
+            tools: tuple[ToolSpec, ...],
+            system_instructions: str | None = None,
+        ) -> AsyncIterator[ProviderEvent]:
+            del conversation, tools, system_instructions
+            started.set()
+            await release.wait()
+            yield ProviderResponseFinished(
+                AssistantExchange((TextBlock(summary),), "end_turn")
+            )
+
+    history: tuple[ConversationExchange, ...] = tuple(
+        exchange
+        for index in range(4)
+        for exchange in (
+            UserExchange(f"question {index} " * 30),
+            AssistantExchange((TextBlock(f"answer {index} " * 30),), "end_turn"),
+        )
+    )
+    application = AgentApplication(
+        BlockingSummaryProvider(),
+        ToolDispatcher(ToolCatalog({})),
+        InMemorySessionStore(),
+        initial_exchanges=history,
+        context_manager=ContextManager(
+            ContextBudget(context_window=20_000, max_output_tokens=2_000),
+            TokenEstimator(),
+            retained_exchanges=2,
+        ),
+    )
+    app = CodingAgentTui(
+        application,
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        task = asyncio.create_task(app._command("/compact"))
+        await started.wait()
+        await pilot.pause()
+
+        progress = app.query_one(".compaction-progress", CompactionProgress)
+        assert "Compacting context" in str(progress.render())
+        assert app.query_one("#composer", PromptTextArea).disabled is True
+
+        release.set()
+        await task
+        await pilot.pause()
+        assert "Compacted context with provider summary" in str(progress.render())
+        assert app.query_one("#composer", PromptTextArea).disabled is False
 
 
 async def test_tui_preserves_text_and_tool_chronology() -> None:

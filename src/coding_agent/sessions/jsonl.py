@@ -14,6 +14,7 @@ from typing import cast
 
 from coding_agent.domain import (
     AssistantExchange,
+    CompactionRecord,
     ContentBlock,
     ConversationExchange,
     RedactedThinkingBlock,
@@ -93,6 +94,7 @@ class RecoveredSession:
     compaction: dict[str, object] | None = None
     model: str | None = None
     conversation_models: tuple[str | None, ...] = ()
+    compactions: tuple[CompactionRecord, ...] = ()
 
 
 class JsonlSessionStore:
@@ -169,9 +171,15 @@ class JsonlSessionRepository:
             sequence=events[-1].sequence,
             redactor=self._redactor,
         )
-        conversation, conversation_models, unfinished, pending_model, compaction, model = _replay(
-            events
-        )
+        (
+            conversation,
+            conversation_models,
+            unfinished,
+            pending_model,
+            compaction,
+            model,
+            compactions,
+        ) = _replay(events)
         if unfinished is not None:
             repair = ToolContinuationExchange(
                 assistant=unfinished,
@@ -195,6 +203,7 @@ class JsonlSessionRepository:
             compaction,
             model,
             tuple(conversation_models),
+            tuple(compactions),
         )
 
 
@@ -289,12 +298,14 @@ def _replay(
     str | None,
     dict[str, object] | None,
     str | None,
+    list[CompactionRecord],
 ]:
     conversation: list[ConversationExchange] = []
     conversation_models: list[str | None] = []
     pending: AssistantExchange | None = None
     pending_model: str | None = None
     compaction: dict[str, object] | None = None
+    compactions: list[CompactionRecord] = []
     model: str | None = None
     for event in events:
         if event.kind == "user_exchange":
@@ -322,9 +333,10 @@ def _replay(
             pending_model = None
         elif event.kind == "compaction_completed":
             compaction = _require_dict(event.payload, "compaction checkpoint")
+            compactions.append(CompactionRecord(len(conversation), compaction))
         elif event.kind == "model_changed":
             model = _require_string(_require_mapping(event.payload, "model change"), "current")
-    return conversation, conversation_models, pending, pending_model, compaction, model
+    return conversation, conversation_models, pending, pending_model, compaction, model, compactions
 
 
 def _encode_payload(payload: object) -> object:
