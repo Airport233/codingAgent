@@ -70,14 +70,23 @@ async def test_tui_composes_full_screen_workspace() -> None:
         workspace="/tmp/project",
         session_id="session-1",
         available_models=("provider/model",),
+        version="1.2.3",
+        permissions="ask",
     )
 
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app.query_one("#conversation")
         assert app.query_one("#composer")
+        welcome = str(app.query_one("#brand").render())
+        assert "codingAgent v1.2.3" in welcome
+        assert "model        provider/model" in welcome
+        assert "workspace    /tmp/project" in welcome
+        assert "permissions  ask" in welcome
         assert "provider/model" in str(app.query_one("#status-model").render())
         assert "/tmp/project" in str(app.query_one("#status-workspace").render())
+        assert app.query_one("#status-context").display is False
+        assert app.query_one("#status-session").display is False
 
 
 async def test_tui_submits_prompt_and_streams_assistant_card() -> None:
@@ -99,6 +108,8 @@ async def test_tui_submits_prompt_and_streams_assistant_card() -> None:
         assert "Finished successfully." in str(app.query_one(".assistant-message").render())
         assert composer.value == ""
         assert composer.disabled is False
+        assert app.query_one("#status-context").display is True
+        assert app.query_one("#status-session").display is True
 
 
 async def test_composer_soft_wraps_long_input_instead_of_scrolling_horizontally() -> None:
@@ -618,7 +629,6 @@ async def test_tui_replays_full_history_with_compaction_boundary_and_tool_inputs
         assert "recent request" in rendered
         assert "recent answer" in rendered
         assert "Context compacted here" in rendered
-        assert "Resumed full transcript" in rendered
         assert "compacted" in str(app.query_one("#status-context").render())
         tool_body = str(app.query_one(".tool-body").render())
         assert "print('visible after resume')" in tool_body

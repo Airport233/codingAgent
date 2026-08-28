@@ -217,7 +217,12 @@ async def create_runtime(
     if (resume or resume_session_id is not None) and recovered is None:
         raise RuntimeConfigurationError("No session exists for this project")
     if recovered is None:
-        store = await sessions.create(workspace_root)
+        store = sessions.deferred_create(
+            workspace_root,
+            initial_events=(
+                ("model_changed", {"previous": None, "current": settings.model_key}),
+            ),
+        )
         initial_exchanges = ()
     else:
         store = recovered.store
@@ -234,7 +239,7 @@ async def create_runtime(
         if recovered is not None
         else frozenset()
     )
-    if previous_model != settings.model_key:
+    if recovered is not None and previous_model != settings.model_key:
         await store.append(
             "model_changed",
             {"previous": previous_model, "current": settings.model_key},

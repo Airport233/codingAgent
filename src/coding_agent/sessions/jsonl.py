@@ -146,6 +146,40 @@ class JsonlSessionStore:
             self._sequence = sequence
 
 
+class DeferredJsonlSessionStore:
+    """Create the durable session only when the first meaningful event is appended."""
+
+    def __init__(
+        self,
+        repository: JsonlSessionRepository,
+        project_root: Path,
+        session_id: str,
+        initial_events: Sequence[tuple[str, object]] = (),
+    ) -> None:
+        self.session_id = session_id
+        self._repository = repository
+        self._project_root = project_root
+        self._initial_events = tuple(initial_events)
+        self._store: JsonlSessionStore | None = None
+        self._lock = asyncio.Lock()
+
+    @property
+    def started(self) -> bool:
+        return self._store is not None
+
+    async def append(self, kind: str, payload: object) -> None:
+        async with self._lock:
+            if self._store is None:
+                if kind == "session_closed":
+                    return
+                self._store = await self._repository.create(
+                    self._project_root, session_id=self.session_id
+                )
+                for initial_kind, initial_payload in self._initial_events:
+                    await self._store.append(initial_kind, initial_payload)
+            await self._store.append(kind, payload)
+
+
 class JsonlSessionRepository:
     def __init__(self, data_root: Path, *, redactor: Redactor | None = None) -> None:
         self._sessions_root = data_root / "sessions"
@@ -165,6 +199,19 @@ class JsonlSessionRepository:
         await store.append("session_started", {"project_key": project_key})
         return store
 
+    def deferred_create(
+        self,
+        project_root: Path,
+        *,
+        initial_events: Sequence[tuple[str, object]] = (),
+    ) -> DeferredJsonlSessionStore:
+        return DeferredJsonlSessionStore(
+            self,
+            project_root,
+            uuid.uuid4().hex,
+            initial_events,
+        )
+
     async def resume_latest(self, project_root: Path) -> RecoveredSession | None:
         directory = self._sessions_root / _project_key(project_root)
         if not directory.is_dir():
@@ -172,8 +219,16 @@ class JsonlSessionRepository:
         candidates = tuple(directory.glob("*.jsonl"))
         if not candidates:
             return None
-        latest = max(candidates, key=lambda path: (path.stat().st_mtime_ns, path.name))
-        return await self._resume_path(latest)
+        newest_first = sorted(
+            candidates,
+            key=lambda path: (path.stat().st_mtime_ns, path.name),
+            reverse=True,
+        )
+        for candidate in newest_first:
+            recovered = await self._resume_path(candidate)
+            if recovered.conversation:
+                return recovered
+        return None
 
     async def resume(
         self, project_root: Path, session_id: str
@@ -197,6 +252,8 @@ class JsonlSessionRepository:
                     continue
                 conversation, _, _, _, compaction, model, _ = _replay(events)
             except SessionCorruptError:
+                continue
+            if not conversation:
                 continue
             first_prompt = next(
                 (

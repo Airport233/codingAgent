@@ -38,6 +38,7 @@ from coding_agent.events import (
     AgentCancelled,
     AgentCompleted,
     AgentFailed,
+    AgentStarted,
     ContextUsageChanged,
     TextDelta,
     ThinkingDelta,
@@ -301,6 +302,8 @@ class CodingAgentTui(App[None]):
         workspace: str,
         session_id: str,
         available_models: tuple[str, ...] = (),
+        version: str = "unknown",
+        permissions: str = "automatic",
         switch_model: TransitionCallback | None = None,
         clear_session: TransitionCallback | None = None,
         list_sessions: SessionListCallback | None = None,
@@ -312,6 +315,8 @@ class CodingAgentTui(App[None]):
         self.workspace = workspace
         self.session_id = session_id
         self.available_models = available_models
+        self.version = version
+        self.permissions = permissions
         self.switch_model = switch_model
         self.clear_session = clear_session
         self.list_sessions = list_sessions
@@ -331,7 +336,7 @@ class CodingAgentTui(App[None]):
         self._last_history_text: str | None = None
 
     def compose(self) -> ComposeResult:
-        yield Static("codingAgent", id="brand")
+        yield Static(self._welcome_text(), markup=False, id="brand")
         yield VerticalScroll(id="conversation")
         with Horizontal(id="status-bar"):
             yield Label(self.model, id="status-model")
@@ -353,6 +358,7 @@ class CodingAgentTui(App[None]):
     async def on_mount(self) -> None:
         self.query_one("#completion-popup", Vertical).display = False
         await self._render_recovered_history()
+        self._refresh_session_metadata()
         self.query_one("#composer", PromptTextArea).focus()
 
     @on(PromptTextArea.Submitted, "#composer")
@@ -534,7 +540,9 @@ class CodingAgentTui(App[None]):
     async def _run_turn(self, prompt: str) -> None:
         try:
             async for event in self.application.run(prompt):
-                if isinstance(event, TextDelta):
+                if isinstance(event, AgentStarted):
+                    self._refresh_session_metadata()
+                elif isinstance(event, TextDelta):
                     if self._assistant is None:
                         self._assistant = Static(
                             "", markup=False, classes="message assistant-message"
@@ -716,6 +724,8 @@ class CodingAgentTui(App[None]):
         self.query_one("#status-model", Label).update(self.model)
         self.query_one("#status-session", Label).update(f"session {self.session_id[:8]}")
         self.query_one("#status-context", Label).update(self._context_label())
+        self.query_one("#brand", Static).update(self._welcome_text())
+        self._refresh_session_metadata()
 
     def _resume_selected(self, session_id: str | None) -> None:
         if session_id is None:
@@ -769,6 +779,25 @@ class CodingAgentTui(App[None]):
     def _refresh_context_label(self) -> None:
         self.query_one("#status-context", Label).update(self._context_label())
 
+    def _refresh_session_metadata(self) -> None:
+        visible = bool(self.application.conversation_history())
+        self.query_one("#status-context", Label).display = visible
+        self.query_one("#status-session", Label).display = visible
+
+    def _welcome_text(self) -> str:
+        return (
+            "   _________            codingAgent v"
+            f"{self.version}\n"
+            "  / ____/   |           model        "
+            f"{self.model}\n"
+            " / /   / /| |           workspace    "
+            f"{self.workspace}\n"
+            "/ /___/ ___ |           permissions  "
+            f"{self.permissions}\n"
+            "\\____/_/  |_|\n\n"
+            "Tip: Type /help for commands or /resume to continue previous work."
+        )
+
     def _reset_turn_widgets(self) -> None:
         self._assistant = None
         self._assistant_text = ""
@@ -785,7 +814,6 @@ class CodingAgentTui(App[None]):
         history = self.application.conversation_history()
         if not history:
             return
-        checkpoint = self.application.context_checkpoint()
         compactions_by_index: dict[int, list[CompactionRecord]] = {}
         for record in self.application.compaction_history():
             compactions_by_index.setdefault(record.exchange_index, []).append(record)
@@ -798,15 +826,6 @@ class CodingAgentTui(App[None]):
             await self._render_recovered_exchange(exchange)
         for record in compactions_by_index.get(len(history), ()):
             await self._mount_compaction_record(record)
-        if checkpoint is not None:
-            await self._mount(
-                Static(
-                    "Resumed full transcript · compacted model context is active; "
-                    "scroll up to view the boundary.",
-                    markup=False,
-                    classes="message notice resume-status",
-                )
-            )
 
     async def _mount_compaction_record(self, record: CompactionRecord) -> None:
         payload = record.payload

@@ -60,6 +60,39 @@ def test_runtime_settings_use_environment_without_exposing_private_values(tmp_pa
     assert "context=unavailable" in status_line
 
 
+@pytest.mark.asyncio
+async def test_new_runtime_does_not_persist_an_empty_session(tmp_path: Path) -> None:
+    settings = RuntimeSettings.from_environment(
+        workspace=tmp_path,
+        model="example-model",
+        environ={
+            "CODING_AGENT_BASE_URL": "https://example.invalid/anthropic",
+            "CODING_AGENT_API_KEY": "private-test-credential",
+        },
+        data_root=tmp_path / "data",
+    )
+
+    unused = await create_runtime(settings, provider=FakeProvider([]))
+    await unused.application.close_session()
+    await unused.aclose()
+    assert not list((tmp_path / "data").rglob("*.jsonl"))
+
+    active = await create_runtime(
+        settings,
+        provider=FakeProvider([AssistantExchange((TextBlock("answer"),), "end_turn")]),
+    )
+    _ = [event async for event in active.application.run("first prompt")]
+    await active.aclose()
+
+    session_files = list((tmp_path / "data").rglob("*.jsonl"))
+    assert len(session_files) == 1
+    records = session_files[0].read_text(encoding="utf-8").splitlines()
+    assert len(records) >= 4
+    assert '"kind":"session_started"' in records[0]
+    assert '"kind":"model_changed"' in records[1]
+    assert '"kind":"user_exchange"' in records[2]
+
+
 def test_runtime_settings_load_user_provider_profile(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text(

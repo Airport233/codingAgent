@@ -162,6 +162,41 @@ async def test_sessions_can_be_listed_and_resumed_by_id(
 
 
 @pytest.mark.asyncio
+async def test_deferred_session_is_not_persisted_until_meaningful_activity(
+    roots: tuple[Path, Path, Path],
+) -> None:
+    data_root, project, _ = roots
+    repository = JsonlSessionRepository(data_root)
+    untouched = repository.deferred_create(
+        project,
+        initial_events=(("model_changed", {"previous": None, "current": "model-a"}),),
+    )
+
+    await untouched.append("session_closed", {})
+
+    assert await repository.list_sessions(project) == ()
+    assert not (data_root / "sessions").exists()
+
+    active = repository.deferred_create(
+        project,
+        initial_events=(("model_changed", {"previous": None, "current": "model-a"}),),
+    )
+    await active.append("user_exchange", UserExchange("First real prompt"))
+
+    summaries = await repository.list_sessions(project)
+    assert len(summaries) == 1
+    assert summaries[0].session_id == active.session_id
+    assert summaries[0].title == "First real prompt"
+
+    legacy_empty = await repository.create(project, session_id="legacy-empty")
+    await legacy_empty.append("session_closed", {})
+    assert len(await repository.list_sessions(project)) == 1
+    latest = await repository.resume_latest(project)
+    assert latest is not None
+    assert latest.store.session_id == active.session_id
+
+
+@pytest.mark.asyncio
 async def test_starting_a_new_session_preserves_the_closed_session_file(
     roots: tuple[Path, Path, Path],
 ) -> None:

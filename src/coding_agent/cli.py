@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Annotated
 
@@ -285,7 +286,12 @@ async def _run_cli(
             context_window=current_settings.context_window_override,
             auto_compact_ratio=current_settings.auto_compact_ratio_override,
         )
-        next_runtime = await create_runtime(next_settings, resume=True)
+        next_runtime = await create_runtime(
+            next_settings,
+            resume_session_id=(
+                runtime.session_id if runtime.application.conversation_history() else None
+            ),
+        )
         await runtime.aclose()
         runtime = next_runtime
         current_settings = next_settings
@@ -337,9 +343,11 @@ async def _run_cli(
         tui = CodingAgentTui(
             runtime.application,
             model=current_settings.model_key,
-            workspace=str(current_settings.workspace),
+            workspace=_display_workspace(current_settings.workspace),
             session_id=runtime.session_id,
             available_models=current_settings.available_models,
+            version=_package_version(),
+            permissions="automatic",
             switch_model=switch_model,
             clear_session=clear_session,
             list_sessions=list_sessions,
@@ -357,6 +365,22 @@ def _transition(runtime: AgentRuntime, settings: RuntimeSettings) -> CliTransiti
         runtime.session_id,
         settings.available_models,
     )
+
+
+def _package_version() -> str:
+    try:
+        return version("coding-agent")
+    except PackageNotFoundError:
+        return "development"
+
+
+def _display_workspace(path: Path) -> str:
+    resolved = path.resolve()
+    try:
+        relative = resolved.relative_to(Path.home())
+    except ValueError:
+        return str(resolved)
+    return "~" if not relative.parts else f"~/{relative.as_posix()}"
 
 
 def _status_line(settings: RuntimeSettings, application: AgentApplication, session_id: str) -> str:
