@@ -83,6 +83,20 @@
 - `CODING_AGENT.md` 项目/目录级记忆；
 - 摘要、工具记录和原始协议内容保留。
 
+### M4.5：可运行集成基线
+
+分支：`feature/runtime-integration`
+
+该切片在 M5 之前完成，优先降低交付主流程风险：
+
+- 从环境变量和用户级配置加载 Provider 与默认模型；
+- 装配真实 Provider、内置工具、JSONL 会话和项目记忆；
+- 将会话恢复结果安装到 Application，避免恢复后重放工具；
+- 提供可在真实工作区连续输入任务的最小滚动式 CLI；
+- 用 FakeProvider 运行离线端到端测试，并显式运行真实 Provider 冒烟验证。
+
+本切片不实现上下文压缩、完整 Slash 命令集或终端视觉打磨；这些仍分别属于 M5 和 M6。
+
 ### M5：上下文与压缩
 
 分支：`feature/context-compaction`
