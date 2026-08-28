@@ -19,6 +19,7 @@ from coding_agent.events import (
     TextDelta,
     ToolFinished,
     ToolStarted,
+    WarningRaised,
 )
 from coding_agent.memory.loader import ProjectMemoryLoader
 from coding_agent.providers.base import Provider, ProviderResponseFinished, ProviderTextDelta
@@ -54,11 +55,34 @@ class AgentApplication:
     async def compact_context(self, reason: str = "manual") -> CompactionCheckpoint | None:
         if self._context_manager is None:
             return None
+        history = self._conversation.snapshot()
+        summarize = (
+            None
+            if self._context_manager.status(history).level == "hard"
+            else self._request_context_summary
+        )
         return await self._context_manager.compact(
-            self._conversation.snapshot(),
+            history,
             reason=reason,
             persist=self._sessions.append,
+            summarize=summarize,
         )
+
+    async def _request_context_summary(self, exchanges: tuple[ConversationExchange, ...]) -> str:
+        instruction = UserExchange(
+            "Summarize the preceding conversation as plain text with exactly these fields, "
+            "one per line: task_goal, user_constraints, decisions, files_read, "
+            "files_modified, commands_and_results, verification_status, known_failures, "
+            "pending_work. Preserve concrete paths, commands, results, constraints, and "
+            "unfinished work. Do not call tools."
+        )
+        response: AssistantExchange | None = None
+        async for event in self._provider.stream((*exchanges, instruction), (), None):
+            if isinstance(event, ProviderResponseFinished):
+                response = event.exchange
+        if response is None or response.stop_reason != "end_turn":
+            raise RuntimeError("Provider did not complete the context summary")
+        return response.text
 
     async def run(self, prompt: str) -> AsyncIterator[CoreEvent]:
         user_exchange = UserExchange(content=prompt)
@@ -91,8 +115,16 @@ class AgentApplication:
             if self._context_manager is not None:
                 status = self._context_manager.status(self._conversation.snapshot())
                 if status.level in {"soft", "hard"}:
-                    await self.compact_context(reason="auto")
+                    try:
+                        await self.compact_context(reason="auto")
+                    except Exception:
+                        yield WarningRaised(
+                            "Context compaction failed; continuing with the original context"
+                        )
                 request_history = self._context_manager.project(self._conversation.snapshot())
+                if self._context_manager.status(self._conversation.snapshot()).level == "hard":
+                    yield AgentFailed(message="Context remains above the safe request limit")
+                    return
             else:
                 request_history = self._conversation.snapshot()
             async for event in self._provider.stream(
@@ -110,6 +142,8 @@ class AgentApplication:
                 return
 
             await self._sessions.append("assistant_exchange", response)
+            if self._context_manager is not None:
+                self._context_manager.record_provider_usage(request_history, response.usage)
             if response.tool_uses:
                 results = []
                 for call in response.tool_uses:

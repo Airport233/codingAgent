@@ -90,6 +90,7 @@ class RecoveredSession:
     store: JsonlSessionStore
     conversation: tuple[ConversationExchange, ...]
     warnings: tuple[str, ...]
+    compaction: dict[str, object] | None = None
 
 
 class JsonlSessionStore:
@@ -166,7 +167,7 @@ class JsonlSessionRepository:
             sequence=events[-1].sequence,
             redactor=self._redactor,
         )
-        conversation, unfinished = _replay(events)
+        conversation, unfinished, compaction = _replay(events)
         if unfinished is not None:
             repair = ToolContinuationExchange(
                 assistant=unfinished,
@@ -182,7 +183,7 @@ class JsonlSessionRepository:
             )
             await store.append("tool_continuation", repair)
             conversation.append(repair)
-        return RecoveredSession(store, tuple(conversation), tuple(warnings))
+        return RecoveredSession(store, tuple(conversation), tuple(warnings), compaction)
 
 
 def _project_key(project_root: Path) -> str:
@@ -269,9 +270,10 @@ def _validate_event_sequence(events: Sequence[SessionEvent]) -> None:
 
 def _replay(
     events: Sequence[SessionEvent],
-) -> tuple[list[ConversationExchange], AssistantExchange | None]:
+) -> tuple[list[ConversationExchange], AssistantExchange | None, dict[str, object] | None]:
     conversation: list[ConversationExchange] = []
     pending: AssistantExchange | None = None
+    compaction: dict[str, object] | None = None
     for event in events:
         if event.kind == "user_exchange":
             if pending is not None:
@@ -291,7 +293,9 @@ def _replay(
                 raise SessionCorruptError("Tool continuation does not match its assistant exchange")
             conversation.append(continuation)
             pending = None
-    return conversation, pending
+        elif event.kind == "compaction_completed":
+            compaction = _require_dict(event.payload, "compaction checkpoint")
+    return conversation, pending, compaction
 
 
 def _encode_payload(payload: object) -> object:

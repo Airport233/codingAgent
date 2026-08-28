@@ -36,6 +36,17 @@ class AgentFailed:
     message: str
 
 
+@dataclass(frozen=True, slots=True)
+class WarningRaised:
+    message: str
+
+
 type CoreEvent = (
-    AgentStarted | TextDelta | ToolStarted | ToolFinished | AgentCompleted | AgentFailed
+    AgentStarted
+    | TextDelta
+    | ToolStarted
+    | ToolFinished
+    | AgentCompleted
+    | AgentFailed
+    | WarningRaised
 )

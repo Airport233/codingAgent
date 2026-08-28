@@ -102,6 +102,8 @@ class RuntimeSettings:
             )
         if max_tokens <= 0 or max_steps <= 0 or context_window <= max_tokens:
             raise RuntimeConfigurationError("Token and step limits must be positive")
+        if not 0 < auto_compact_ratio < 1:
+            raise RuntimeConfigurationError("Auto compaction ratio must be between zero and one")
         resolved_workspace = workspace.resolve()
         if not resolved_workspace.is_dir():
             raise RuntimeConfigurationError("Workspace must be an existing directory")
@@ -183,6 +185,16 @@ async def create_runtime(
         )
 
     catalog = await ToolCatalog.create((BuiltinToolSource(project_root),))
+    context_manager = ContextManager(
+        ContextBudget(
+            context_window=settings.context_window,
+            max_output_tokens=settings.max_tokens,
+            auto_ratio=settings.auto_compact_ratio,
+        ),
+        TokenEstimator(),
+    )
+    if recovered is not None and recovered.compaction is not None:
+        context_manager.restore(initial_exchanges, recovered.compaction)
     application = AgentApplication(
         selected_provider,
         ToolDispatcher(catalog),
@@ -190,14 +202,7 @@ async def create_runtime(
         max_steps=settings.max_steps,
         memory_loader=ProjectMemoryLoader(project_root, settings.workspace),
         initial_exchanges=initial_exchanges,
-        context_manager=ContextManager(
-            ContextBudget(
-                context_window=settings.context_window,
-                max_output_tokens=settings.max_tokens,
-                auto_ratio=settings.auto_compact_ratio,
-            ),
-            TokenEstimator(),
-        ),
+        context_manager=context_manager,
     )
     return AgentRuntime(application, store.session_id, client)
 

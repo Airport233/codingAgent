@@ -73,10 +73,18 @@ async def test_jsonl_round_trip_preserves_raw_blocks_usage_and_tool_metadata(
     await store.append("assistant_exchange", assistant)
     await store.append("tool_continuation", continuation)
     await store.append("assistant_exchange", final)
+    checkpoint = {
+        "reason": "manual",
+        "retained_from": 1,
+        "before_tokens": 100,
+        "after_tokens": 40,
+        "summary": "Earlier conversation summary",
+    }
+    await store.append("compaction_completed", checkpoint)
 
     lines = store.events_path.read_text(encoding="utf-8").splitlines()
     decoded = [json.loads(line) for line in lines]
-    assert [event["sequence"] for event in decoded] == [1, 2, 3, 4, 5]
+    assert [event["sequence"] for event in decoded] == [1, 2, 3, 4, 5, 6]
     assert all(event["schema_version"] == 1 for event in decoded)
     assert all(event["session_id"] == store.session_id for event in decoded)
     assert all(event["event_id"] for event in decoded)
@@ -86,6 +94,7 @@ async def test_jsonl_round_trip_preserves_raw_blocks_usage_and_tool_metadata(
     assert recovered is not None
     assert recovered.conversation == (user, continuation, final)
     assert recovered.warnings == ()
+    assert recovered.compaction == checkpoint
 
 
 @pytest.mark.asyncio
