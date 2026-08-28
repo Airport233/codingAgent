@@ -32,12 +32,15 @@ def root(
     model: Annotated[str | None, typer.Option(help="Provider model ID.")] = None,
     workspace: Annotated[Path | None, typer.Option(help="Project working directory.")] = None,
     resume: Annotated[bool, typer.Option(help="Resume the latest project session.")] = False,
-    max_steps: Annotated[int, typer.Option(min=1, help="Maximum Agent steps per turn.")] = 20,
-    max_tokens: Annotated[int, typer.Option(min=1, help="Maximum output tokens.")] = 4096,
-    context_window: Annotated[int, typer.Option(min=2, help="Model context window.")] = 200_000,
+    max_steps: Annotated[
+        int | None, typer.Option(min=1, help="Maximum Agent steps per turn.")
+    ] = None,
+    max_tokens: Annotated[int | None, typer.Option(min=1, help="Maximum output tokens.")] = None,
+    context_window: Annotated[int | None, typer.Option(min=2, help="Model context window.")] = None,
     auto_compact_ratio: Annotated[
-        float, typer.Option(min=0.01, max=0.99, help="Automatic compaction threshold ratio.")
-    ] = 0.8,
+        float | None,
+        typer.Option(min=0.01, max=0.99, help="Automatic compaction threshold ratio."),
+    ] = None,
     prompt: Annotated[str | None, typer.Option(help="Run one prompt and exit.")] = None,
 ) -> None:
     """Run codingAgent from the terminal."""
@@ -81,11 +84,14 @@ async def run_repl(
             else:
                 write_output(
                     f"Context: {status.used_tokens}/{status.context_window} tokens "
-                    f"estimated ({status.level}); auto={status.soft_limit}, "
+                    f"estimated ({status.used_tokens / status.context_window:.1%}, "
+                    f"{status.level}); auto={status.soft_limit}, "
                     f"hard={status.hard_limit}"
                 )
                 if status.last_provider_input_tokens is not None:
                     write_output(f"; last provider input={status.last_provider_input_tokens} exact")
+                if status.model_projection_active:
+                    write_output("; model-switch projection active")
                 write_output("\n")
             continue
         if prompt == "/compact":

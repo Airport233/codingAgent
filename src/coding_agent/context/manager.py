@@ -8,6 +8,8 @@ from typing import Literal
 from coding_agent.domain import (
     AssistantExchange,
     ConversationExchange,
+    RedactedThinkingBlock,
+    ThinkingBlock,
     ToolContinuationExchange,
     UserExchange,
 )
@@ -39,6 +41,7 @@ class ContextStatus:
     level: PressureLevel
     usage_source: Literal["estimated"] = "estimated"
     last_provider_input_tokens: int | None = None
+    model_projection_active: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,15 +81,24 @@ class TokenEstimator:
     def __init__(self) -> None:
         self._calibration = 1.0
 
-    def estimate(self, exchanges: Sequence[ConversationExchange]) -> int:
+    def estimate(
+        self, exchanges: Sequence[ConversationExchange], supplemental_characters: int = 0
+    ) -> int:
         characters = sum(len(_exchange_text(exchange)) for exchange in exchanges)
-        baseline = max(1, math.ceil(characters / 3)) if exchanges else 0
+        characters += max(0, supplemental_characters)
+        baseline = max(1, math.ceil(characters / 3)) if characters else 0
         return math.ceil(baseline * self._calibration)
 
-    def calibrate(self, exchanges: Sequence[ConversationExchange], actual_tokens: int) -> None:
+    def calibrate(
+        self,
+        exchanges: Sequence[ConversationExchange],
+        actual_tokens: int,
+        supplemental_characters: int = 0,
+    ) -> None:
         if actual_tokens <= 0:
             return
         characters = sum(len(_exchange_text(exchange)) for exchange in exchanges)
+        characters += max(0, supplemental_characters)
         baseline = max(1, math.ceil(characters / 3))
         self._calibration = min(4.0, max(0.25, actual_tokens / baseline))
 
@@ -108,17 +120,23 @@ class ContextManager:
         estimator: TokenEstimator,
         *,
         retained_exchanges: int = 6,
+        excluded_thinking_indices: frozenset[int] = frozenset(),
     ) -> None:
         if retained_exchanges < 1:
             raise ValueError("retained_exchanges must be positive")
         self._budget = budget
         self._estimator = estimator
         self._retained_exchanges = retained_exchanges
+        self._excluded_thinking_indices = excluded_thinking_indices
         self._checkpoint: CompactionCheckpoint | None = None
         self._last_provider_input_tokens: int | None = None
 
-    def status(self, history: Sequence[ConversationExchange]) -> ContextStatus:
-        status = self._budget.status(self._estimator.estimate(self.project(history)))
+    def status(
+        self, history: Sequence[ConversationExchange], supplemental_characters: int = 0
+    ) -> ContextStatus:
+        status = self._budget.status(
+            self._estimator.estimate(self.project(history), supplemental_characters)
+        )
         return ContextStatus(
             used_tokens=status.used_tokens,
             context_window=status.context_window,
@@ -127,25 +145,44 @@ class ContextManager:
             hard_limit=status.hard_limit,
             level=status.level,
             last_provider_input_tokens=self._last_provider_input_tokens,
+            model_projection_active=bool(self._excluded_thinking_indices),
         )
 
     def record_provider_usage(
         self,
         request: Sequence[ConversationExchange],
         usage: Mapping[str, int],
+        supplemental_characters: int = 0,
     ) -> None:
         actual = usage.get("input_tokens")
         if actual is None:
             return
         self._last_provider_input_tokens = actual
-        self._estimator.calibrate(request, actual)
+        self._estimator.calibrate(request, actual, supplemental_characters)
 
     def project(self, history: Sequence[ConversationExchange]) -> tuple[ConversationExchange, ...]:
         if self._checkpoint is None:
-            return tuple(history)
-        return (
-            UserExchange(self._checkpoint.summary),
-            *tuple(history[self._checkpoint.retained_from :]),
+            projected = tuple(enumerate(history))
+        else:
+            projected = (
+                (None, UserExchange(self._checkpoint.summary)),
+                *tuple(
+                    enumerate(
+                        history[self._checkpoint.retained_from :], self._checkpoint.retained_from
+                    )
+                ),
+            )
+        return tuple(
+            filtered_exchange
+            for index, exchange in projected
+            if (
+                filtered_exchange := (
+                    _without_thinking(exchange)
+                    if index in self._excluded_thinking_indices
+                    else exchange
+                )
+            )
+            is not None
         )
 
     def prepare(
@@ -154,6 +191,7 @@ class ContextManager:
         *,
         reason: str,
         summary: str | None = None,
+        supplemental_characters: int = 0,
     ) -> CompactionCheckpoint | None:
         retained_from = max(0, len(history) - self._retained_exchanges)
         if retained_from == 0:
@@ -164,8 +202,8 @@ class ContextManager:
             UserExchange(summary),
             *tuple(history[retained_from:]),
         )
-        before_tokens = self._estimator.estimate(history)
-        after_tokens = self._estimator.estimate(projected)
+        before_tokens = self._estimator.estimate(history, supplemental_characters)
+        after_tokens = self._estimator.estimate(projected, supplemental_characters)
         if after_tokens >= before_tokens:
             return None
         return CompactionCheckpoint(
@@ -184,6 +222,7 @@ class ContextManager:
         reason: str,
         persist: PersistCheckpoint,
         summarize: SummarizeContext | None = None,
+        supplemental_characters: int = 0,
     ) -> CompactionCheckpoint | None:
         retained_from = max(0, len(history) - self._retained_exchanges)
         if retained_from == 0:
@@ -192,17 +231,36 @@ class ContextManager:
             "compaction_started",
             {
                 "reason": reason,
-                "before_tokens": self._estimator.estimate(history),
+                "before_tokens": self._estimator.estimate(history, supplemental_characters),
             },
         )
         candidate: CompactionCheckpoint | None = None
         strategy = "deterministic"
         if summarize is not None:
             try:
-                generated = await summarize(tuple(history[:retained_from]))
+                summary_input = tuple(history[:retained_from])
+                if self._excluded_thinking_indices:
+                    summary_input = tuple(
+                        filtered_exchange
+                        for index, exchange in enumerate(summary_input)
+                        if (
+                            filtered_exchange := (
+                                _without_thinking(exchange)
+                                if index in self._excluded_thinking_indices
+                                else exchange
+                            )
+                        )
+                        is not None
+                    )
+                generated = await summarize(summary_input)
                 if not _valid_structured_summary(generated):
                     raise ValueError("Provider returned an invalid context summary")
-                candidate = self.prepare(history, reason=reason, summary=generated)
+                candidate = self.prepare(
+                    history,
+                    reason=reason,
+                    summary=generated,
+                    supplemental_characters=supplemental_characters,
+                )
                 if candidate is None:
                     raise ValueError("Provider summary does not reduce context usage")
                 strategy = "provider"
@@ -212,10 +270,14 @@ class ContextManager:
                     {"reason": reason, "strategy": "provider"},
                 )
         if candidate is None:
-            candidate = self.prepare(history, reason=reason)
+            candidate = self.prepare(
+                history,
+                reason=reason,
+                supplemental_characters=supplemental_characters,
+            )
         if candidate is None:
             await persist("compaction_failed", {"reason": reason})
-            return None
+            raise ValueError("Context compaction did not reduce token usage")
         await persist(
             "compaction_completed",
             {
@@ -248,7 +310,10 @@ class ContextManager:
             or not isinstance(before_tokens, int)
             or not isinstance(after_tokens, int)
             or not isinstance(summary, str)
-            or not summary.strip()
+            or before_tokens < 0
+            or after_tokens < 0
+            or after_tokens >= before_tokens
+            or not _valid_structured_summary(summary)
         ):
             raise ValueError("Invalid compaction checkpoint")
         projected: tuple[ConversationExchange, ...] = (
@@ -268,26 +333,54 @@ class ContextManager:
 
 
 def _summarize(exchanges: Sequence[ConversationExchange]) -> str:
-    excerpts: list[str] = []
+    user_messages: list[str] = []
+    decisions: list[str] = []
+    files_read: set[str] = set()
+    files_modified: set[str] = set()
+    commands_and_results: list[str] = []
+    failures: list[str] = []
     for exchange in exchanges:
-        rendered = _exchange_text(exchange).strip().replace("\x00", "")
-        if rendered:
-            excerpts.append(rendered[:120])
-    transcript = " | ".join(excerpts)[:140] or "unknown"
+        if isinstance(exchange, UserExchange):
+            user_messages.append(_one_line(exchange.content))
+        elif isinstance(exchange, AssistantExchange):
+            if exchange.text.strip():
+                decisions.append(_one_line(exchange.text))
+        elif isinstance(exchange, ToolContinuationExchange):
+            for call, result in zip(exchange.assistant.tool_uses, exchange.results, strict=True):
+                path = call.input.get("path")
+                if isinstance(path, str):
+                    if call.name in {"write_file", "edit_file", "mkdir"}:
+                        files_modified.add(path)
+                    elif call.name in {"read_file", "code_search"}:
+                        files_read.add(path)
+                detail = f"{call.name}({call.input}) => {result.content}"
+                commands_and_results.append(_one_line(detail))
+                if result.is_error:
+                    failures.append(_one_line(detail))
     values = {
-        "task_goal": excerpts[0][:80] if excerpts else "unknown",
-        "user_constraints": "unknown",
-        "decisions": transcript,
-        "files_read": "unknown",
-        "files_modified": "unknown",
-        "commands_and_results": "unknown",
-        "verification_status": "unknown",
-        "known_failures": "unknown",
+        "task_goal": _joined(user_messages[:1], 120),
+        "user_constraints": _joined(user_messages[1:], 160),
+        "decisions": _joined(decisions, 180),
+        "files_read": _joined(sorted(files_read), 100),
+        "files_modified": _joined(sorted(files_modified), 100),
+        "commands_and_results": _joined(commands_and_results, 240),
+        "verification_status": (
+            _joined(commands_and_results[-1:], 120) if commands_and_results else "unknown"
+        ),
+        "known_failures": _joined(failures, 120),
         "pending_work": "continue from retained exchanges",
     }
     lines = ["context_summary_version: 1", "strategy: deterministic"]
     lines.extend(f"{field}: {values[field]}" for field in SUMMARY_FIELDS)
     return "\n".join(lines)[:1600]
+
+
+def _one_line(value: object) -> str:
+    return " ".join(str(value).replace("\x00", "").split())
+
+
+def _joined(values: Sequence[str], limit: int) -> str:
+    return (" | ".join(value for value in values if value) or "unknown")[:limit]
 
 
 def _valid_structured_summary(summary: str) -> bool:
@@ -310,3 +403,25 @@ def _exchange_text(exchange: ConversationExchange) -> str:
         )
         return f"Assistant tools: {results}"
     raise TypeError(f"Unsupported exchange: {type(exchange).__name__}")
+
+
+def _without_thinking(exchange: ConversationExchange) -> ConversationExchange | None:
+    if isinstance(exchange, UserExchange):
+        return exchange
+    if isinstance(exchange, ToolContinuationExchange):
+        assistant = _assistant_without_thinking(exchange.assistant)
+        if assistant is None:
+            raise ValueError("Tool continuation lost its tool-use blocks during projection")
+        return ToolContinuationExchange(assistant, exchange.results)
+    return _assistant_without_thinking(exchange)
+
+
+def _assistant_without_thinking(exchange: AssistantExchange) -> AssistantExchange | None:
+    blocks = tuple(
+        block
+        for block in exchange.blocks
+        if not isinstance(block, (ThinkingBlock, RedactedThinkingBlock))
+    )
+    if not blocks:
+        return None
+    return AssistantExchange(blocks, exchange.stop_reason, exchange.usage)
