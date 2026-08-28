@@ -97,7 +97,7 @@ async def test_runtime_resume_installs_durable_conversation_before_next_request(
 
 
 @pytest.mark.asyncio
-async def test_repl_accepts_multiple_turns_and_exits_without_provider_work(tmp_path: Path) -> None:
+async def test_repl_accepts_multiple_turns_and_compacts_context(tmp_path: Path) -> None:
     settings = RuntimeSettings.from_environment(
         workspace=tmp_path,
         model="example-model",
@@ -109,12 +109,40 @@ async def test_repl_accepts_multiple_turns_and_exits_without_provider_work(tmp_p
     )
     provider = FakeProvider(
         [
-            AssistantExchange((TextBlock("answer one"),), stop_reason="end_turn"),
-            AssistantExchange((TextBlock("answer two"),), stop_reason="end_turn"),
+            AssistantExchange((TextBlock("answer one " * 80),), stop_reason="end_turn"),
+            AssistantExchange((TextBlock("answer two " * 80),), stop_reason="end_turn"),
+            AssistantExchange((TextBlock("answer three " * 80),), stop_reason="end_turn"),
+            AssistantExchange((TextBlock("answer four " * 80),), stop_reason="end_turn"),
+            AssistantExchange(
+                (
+                    TextBlock(
+                        "task_goal: answer the questions\n"
+                        "user_constraints: none\n"
+                        "decisions: four answers supplied\n"
+                        "files_read: none\n"
+                        "files_modified: none\n"
+                        "commands_and_results: none\n"
+                        "verification_status: not applicable\n"
+                        "known_failures: none\n"
+                        "pending_work: continue the conversation"
+                    ),
+                ),
+                stop_reason="end_turn",
+            ),
         ]
     )
     runtime = await create_runtime(settings, provider=provider)
-    inputs: Iterator[str] = iter(("question one", "question two", "/exit"))
+    inputs: Iterator[str] = iter(
+        (
+            "question one " * 80,
+            "question two " * 80,
+            "question three " * 80,
+            "question four " * 80,
+            "/context",
+            "/compact",
+            "/exit",
+        )
+    )
     output: list[str] = []
 
     async def read_input() -> str:
@@ -123,9 +151,11 @@ async def test_repl_accepts_multiple_turns_and_exits_without_provider_work(tmp_p
     await run_repl(runtime.application, read_input=read_input, write_output=output.append)
     await runtime.aclose()
 
-    assert provider.request_count == 2
+    assert provider.request_count == 5
     assert "answer one" in "".join(output)
-    assert "answer two" in "".join(output)
+    assert "answer four" in "".join(output)
+    assert "Context:" in "".join(output)
+    assert "Compacted context:" in "".join(output)
 
 
 def test_console_output_does_not_treat_model_text_as_rich_markup() -> None:

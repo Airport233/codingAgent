@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Sequence
 
+from coding_agent.context import CompactionCheckpoint, ContextManager, ContextStatus
 from coding_agent.domain import (
     AssistantExchange,
     Conversation,
@@ -18,6 +19,7 @@ from coding_agent.events import (
     TextDelta,
     ToolFinished,
     ToolStarted,
+    WarningRaised,
 )
 from coding_agent.memory.loader import ProjectMemoryLoader
 from coding_agent.providers.base import Provider, ProviderResponseFinished, ProviderTextDelta
@@ -34,6 +36,7 @@ class AgentApplication:
         max_steps: int = 20,
         memory_loader: ProjectMemoryLoader | None = None,
         initial_exchanges: Sequence[ConversationExchange] = (),
+        context_manager: ContextManager | None = None,
     ) -> None:
         self._provider = provider
         self._dispatcher = dispatcher
@@ -42,6 +45,44 @@ class AgentApplication:
         self._memory_loader = memory_loader
         self._last_memory_digest: str | None = None
         self._conversation = Conversation(list(initial_exchanges))
+        self._context_manager = context_manager
+
+    def context_status(self) -> ContextStatus | None:
+        if self._context_manager is None:
+            return None
+        return self._context_manager.status(self._conversation.snapshot())
+
+    async def compact_context(self, reason: str = "manual") -> CompactionCheckpoint | None:
+        if self._context_manager is None:
+            return None
+        history = self._conversation.snapshot()
+        summarize = (
+            None
+            if self._context_manager.status(history).level == "hard"
+            else self._request_context_summary
+        )
+        return await self._context_manager.compact(
+            history,
+            reason=reason,
+            persist=self._sessions.append,
+            summarize=summarize,
+        )
+
+    async def _request_context_summary(self, exchanges: tuple[ConversationExchange, ...]) -> str:
+        instruction = UserExchange(
+            "Summarize the preceding conversation as plain text with exactly these fields, "
+            "one per line: task_goal, user_constraints, decisions, files_read, "
+            "files_modified, commands_and_results, verification_status, known_failures, "
+            "pending_work. Preserve concrete paths, commands, results, constraints, and "
+            "unfinished work. Do not call tools."
+        )
+        response: AssistantExchange | None = None
+        async for event in self._provider.stream((*exchanges, instruction), (), None):
+            if isinstance(event, ProviderResponseFinished):
+                response = event.exchange
+        if response is None or response.stop_reason != "end_turn":
+            raise RuntimeError("Provider did not complete the context summary")
+        return response.text
 
     async def run(self, prompt: str) -> AsyncIterator[CoreEvent]:
         user_exchange = UserExchange(content=prompt)
@@ -71,8 +112,23 @@ class AgentApplication:
                         },
                     )
                     self._last_memory_digest = memory.digest
+            if self._context_manager is not None:
+                status = self._context_manager.status(self._conversation.snapshot())
+                if status.level in {"soft", "hard"}:
+                    try:
+                        await self.compact_context(reason="auto")
+                    except Exception:
+                        yield WarningRaised(
+                            "Context compaction failed; continuing with the original context"
+                        )
+                request_history = self._context_manager.project(self._conversation.snapshot())
+                if self._context_manager.status(self._conversation.snapshot()).level == "hard":
+                    yield AgentFailed(message="Context remains above the safe request limit")
+                    return
+            else:
+                request_history = self._conversation.snapshot()
             async for event in self._provider.stream(
-                self._conversation.snapshot(),
+                request_history,
                 self._dispatcher.catalog.specs,
                 system_instructions,
             ):
@@ -86,6 +142,8 @@ class AgentApplication:
                 return
 
             await self._sessions.append("assistant_exchange", response)
+            if self._context_manager is not None:
+                self._context_manager.record_provider_usage(request_history, response.usage)
             if response.tool_uses:
                 results = []
                 for call in response.tool_uses:

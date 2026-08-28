@@ -10,7 +10,14 @@ from prompt_toolkit import PromptSession
 from rich.console import Console
 
 from coding_agent.application import AgentApplication
-from coding_agent.events import AgentCompleted, AgentFailed, TextDelta, ToolFinished, ToolStarted
+from coding_agent.events import (
+    AgentCompleted,
+    AgentFailed,
+    TextDelta,
+    ToolFinished,
+    ToolStarted,
+    WarningRaised,
+)
 from coding_agent.runtime import RuntimeConfigurationError, RuntimeSettings, create_runtime
 
 app = typer.Typer(
@@ -26,6 +33,11 @@ def root(
     workspace: Annotated[Path | None, typer.Option(help="Project working directory.")] = None,
     resume: Annotated[bool, typer.Option(help="Resume the latest project session.")] = False,
     max_steps: Annotated[int, typer.Option(min=1, help="Maximum Agent steps per turn.")] = 20,
+    max_tokens: Annotated[int, typer.Option(min=1, help="Maximum output tokens.")] = 4096,
+    context_window: Annotated[int, typer.Option(min=2, help="Model context window.")] = 200_000,
+    auto_compact_ratio: Annotated[
+        float, typer.Option(min=0.01, max=0.99, help="Automatic compaction threshold ratio.")
+    ] = 0.8,
     prompt: Annotated[str | None, typer.Option(help="Run one prompt and exit.")] = None,
 ) -> None:
     """Run codingAgent from the terminal."""
@@ -35,6 +47,9 @@ def root(
             workspace=selected_workspace,
             model=model,
             max_steps=max_steps,
+            max_tokens=max_tokens,
+            context_window=context_window,
+            auto_compact_ratio=auto_compact_ratio,
         )
         asyncio.run(_run_cli(settings, resume=resume, prompt=prompt))
     except RuntimeConfigurationError as error:
@@ -57,7 +72,35 @@ async def run_repl(
         if prompt == "/exit":
             return
         if prompt == "/help":
-            write_output("Commands: /help, /exit")
+            write_output("Commands: /help, /context, /compact, /exit")
+            continue
+        if prompt == "/context":
+            status = application.context_status()
+            if status is None:
+                write_output("Context management is unavailable.\n")
+            else:
+                write_output(
+                    f"Context: {status.used_tokens}/{status.context_window} tokens "
+                    f"estimated ({status.level}); auto={status.soft_limit}, "
+                    f"hard={status.hard_limit}"
+                )
+                if status.last_provider_input_tokens is not None:
+                    write_output(f"; last provider input={status.last_provider_input_tokens} exact")
+                write_output("\n")
+            continue
+        if prompt == "/compact":
+            try:
+                checkpoint = await application.compact_context()
+            except Exception:
+                write_output("Context compaction failed; original context retained.\n")
+                continue
+            if checkpoint is None:
+                write_output("Context is too short to compact.\n")
+            else:
+                write_output(
+                    f"Compacted context: {checkpoint.before_tokens} -> "
+                    f"{checkpoint.after_tokens} tokens.\n"
+                )
             continue
         async for event in application.run(prompt):
             if isinstance(event, TextDelta):
@@ -71,6 +114,8 @@ async def run_repl(
                 write_output("\n")
             elif isinstance(event, AgentFailed):
                 write_output(f"\n[error] {event.message}\n")
+            elif isinstance(event, WarningRaised):
+                write_output(f"\n[warning] {event.message}\n")
 
 
 def write_console(console: Console, value: str) -> None:

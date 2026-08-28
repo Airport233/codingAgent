@@ -11,6 +11,7 @@ from anthropic import AsyncAnthropic
 from platformdirs import user_config_path, user_data_path
 
 from coding_agent.application import AgentApplication
+from coding_agent.context import ContextBudget, ContextManager, TokenEstimator
 from coding_agent.memory.loader import ProjectMemoryLoader
 from coding_agent.providers.anthropic import AnthropicMessagesProvider
 from coding_agent.providers.base import Provider
@@ -34,6 +35,8 @@ class RuntimeSettings:
     api_key: str = field(repr=False)
     max_tokens: int = 4096
     max_steps: int = 20
+    context_window: int = 200_000
+    auto_compact_ratio: float = 0.8
 
     @classmethod
     def from_environment(
@@ -45,6 +48,8 @@ class RuntimeSettings:
         data_root: Path | None = None,
         max_tokens: int = 4096,
         max_steps: int = 20,
+        context_window: int = 200_000,
+        auto_compact_ratio: float = 0.8,
     ) -> RuntimeSettings:
         return cls.load(
             workspace=workspace,
@@ -54,6 +59,8 @@ class RuntimeSettings:
             config_path=Path("__missing_user_config__"),
             max_tokens=max_tokens,
             max_steps=max_steps,
+            context_window=context_window,
+            auto_compact_ratio=auto_compact_ratio,
         )
 
     @classmethod
@@ -67,6 +74,8 @@ class RuntimeSettings:
         config_path: Path | None = None,
         max_tokens: int = 4096,
         max_steps: int = 20,
+        context_window: int = 200_000,
+        auto_compact_ratio: float = 0.8,
     ) -> RuntimeSettings:
         values = os.environ if environ is None else environ
         config = _read_config(config_path or user_config_path("codingAgent") / "config.toml")
@@ -91,8 +100,10 @@ class RuntimeSettings:
             raise RuntimeConfigurationError(
                 "Missing API key environment variable: CODING_AGENT_API_KEY"
             )
-        if max_tokens <= 0 or max_steps <= 0:
+        if max_tokens <= 0 or max_steps <= 0 or context_window <= max_tokens:
             raise RuntimeConfigurationError("Token and step limits must be positive")
+        if not 0 < auto_compact_ratio < 1:
+            raise RuntimeConfigurationError("Auto compaction ratio must be between zero and one")
         resolved_workspace = workspace.resolve()
         if not resolved_workspace.is_dir():
             raise RuntimeConfigurationError("Workspace must be an existing directory")
@@ -110,6 +121,8 @@ class RuntimeSettings:
             api_key=credential,
             max_tokens=max_tokens,
             max_steps=max_steps,
+            context_window=context_window,
+            auto_compact_ratio=auto_compact_ratio,
         )
 
     @property
@@ -172,6 +185,16 @@ async def create_runtime(
         )
 
     catalog = await ToolCatalog.create((BuiltinToolSource(project_root),))
+    context_manager = ContextManager(
+        ContextBudget(
+            context_window=settings.context_window,
+            max_output_tokens=settings.max_tokens,
+            auto_ratio=settings.auto_compact_ratio,
+        ),
+        TokenEstimator(),
+    )
+    if recovered is not None and recovered.compaction is not None:
+        context_manager.restore(initial_exchanges, recovered.compaction)
     application = AgentApplication(
         selected_provider,
         ToolDispatcher(catalog),
@@ -179,6 +202,7 @@ async def create_runtime(
         max_steps=settings.max_steps,
         memory_loader=ProjectMemoryLoader(project_root, settings.workspace),
         initial_exchanges=initial_exchanges,
+        context_manager=context_manager,
     )
     return AgentRuntime(application, store.session_id, client)
 
