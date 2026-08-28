@@ -5,7 +5,7 @@ description = "Reproduce, diagnose, fix, and verify a failing test"
 
 # Test Fix Workflow
 
-1. Read the failure, the relevant test, and the smallest related production surface.
+1. Inspect `git_status` when available, then read the failure, the relevant test, and the smallest related production surface.
 2. Run the narrowest command that reliably reproduces the failure. Record the actual error.
 3. Identify the root cause. Do not weaken assertions, skip tests, or hide errors merely to turn CI green.
 4. Add or refine a focused regression test when the existing failure does not fully express the bug.

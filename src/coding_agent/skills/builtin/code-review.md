@@ -6,7 +6,7 @@ description = "Review code changes for concrete, actionable defects"
 # Code Review Workflow
 
 1. Determine the exact review scope and inspect repository guidance before judging the change.
-2. Read the diff and enough surrounding code to understand contracts, callers, and platform behavior.
+2. Use `git_status` and the appropriate staged or unstaged `git_diff` when available, then read enough surrounding code to understand contracts, callers, and platform behavior.
 3. Run targeted read-only checks or tests when they can confirm or reject a suspected defect.
 4. Report only actionable findings: incorrect behavior, regressions, security issues, data loss, or missing tests for risky logic.
 5. Rank findings by severity and include a precise file and location plus a reproducible failure scenario.

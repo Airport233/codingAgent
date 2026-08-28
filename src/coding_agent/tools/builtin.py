@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 from coding_agent.plan import PlanState
 from coding_agent.tools.base import RecoverableToolError, Tool, ToolOutput
 from coding_agent.tools.files import EditFileTool, MkdirTool, WriteFileTool
+from coding_agent.tools.git import GitDiffTool, GitStatusTool
 from coding_agent.tools.plan import UpdatePlanTool
 from coding_agent.tools.search import CodeSearchTool
 from coding_agent.tools.shell import ShellConfig, ShellTool
@@ -99,4 +100,6 @@ class BuiltinToolSource:
             EditFileTool(self._workspace, self._read_set),
             ShellTool(self._workspace, self._shell_config),
             UpdatePlanTool(self._plan_state),
+            GitStatusTool(self._workspace),
+            GitDiffTool(self._workspace),
         )
