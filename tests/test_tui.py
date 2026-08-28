@@ -136,6 +136,7 @@ async def test_slash_popup_filters_navigates_completes_and_dismisses() -> None:
         await pilot.pause()
         assert choices.option_count == 1
         assert choices.get_option_at_index(0).id == "/model"
+        assert choices.size.height >= 1
 
         await pilot.press("tab")
         await pilot.pause()
@@ -160,6 +161,35 @@ async def test_slash_popup_filters_navigates_completes_and_dismisses() -> None:
         await pilot.press("backspace")
         await pilot.pause()
         assert popup.display is True
+
+
+async def test_slash_popup_allocates_visible_rows_for_every_command_match() -> None:
+    app = CodingAgentTui(
+        application_with_response(),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test(size=(80, 30)) as pilot:
+        composer = app.query_one("#composer", PromptTextArea)
+        choices = app.query_one("#completion-options", OptionList)
+
+        for prefix, expected in (
+            ("/c", ("/context", "/compact", "/clear")),
+            ("/m", ("/model",)),
+            ("/h", ("/help",)),
+            ("/t", ("/thinking",)),
+        ):
+            composer.value = prefix
+            await pilot.pause()
+            assert (
+                tuple(
+                    choices.get_option_at_index(index).id for index in range(choices.option_count)
+                )
+                == expected
+            )
+            assert choices.size.height >= len(expected)
 
 
 async def test_slash_popup_handles_plain_completion_and_no_matches() -> None:

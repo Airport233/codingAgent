@@ -289,7 +289,8 @@ class CodingAgentTui(App[None]):
             choices.highlighted = None
         else:
             choices.highlighted = 0
-        popup.styles.height = min(max(len(matches), 1) + 2, 10)
+        # Two border rows plus the title row sit outside the option viewport.
+        popup.styles.height = min(max(len(matches), 1) + 3, 10)
         popup.display = True
         self.query_one("#composer", PromptTextArea).completion_active = True
 
