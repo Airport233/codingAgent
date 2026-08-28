@@ -80,7 +80,11 @@ async def test_tui_composes_full_screen_workspace() -> None:
         await pilot.pause()
         assert app.query_one("#conversation")
         assert app.query_one("#composer")
-        welcome = str(app.query_one("#brand").render())
+        conversation = app.query_one("#conversation")
+        brand = app.query_one("#brand")
+        assert brand.parent is conversation
+        assert conversation.children[0] is brand
+        welcome = str(brand.render())
         assert "codingAgent v1.2.3" in welcome
         assert "model        provider/model" in welcome
         assert "workspace    /tmp/project" in welcome
@@ -400,6 +404,8 @@ async def test_resume_command_opens_full_screen_picker_and_installs_selection() 
         rendered = "\n".join(
             str(child.render()) for child in app.query_one("#conversation").children
         )
+        conversation = app.query_one("#conversation")
+        assert conversation.children[0].id == "brand"
         assert "Selected historical task" in rendered
         assert "Historical answer" in rendered
 
@@ -844,7 +850,7 @@ async def test_tui_preserves_text_and_tool_chronology() -> None:
             else "other"
             for child in conversation.children
         ]
-        assert timeline == ["user", "assistant", "tool", "assistant"]
+        assert timeline == ["other", "user", "assistant", "tool", "assistant"]
         replies = app.query(".assistant-message")
         assert "I will inspect the task." in str(replies[0].render())
         assert "The task is complete." in str(replies[1].render())
@@ -893,6 +899,7 @@ async def test_tui_slash_commands_update_state_without_leaving_full_screen() -> 
         assert app.session_id == "session-2"
         assert "provider/other" in str(app.query_one("#status-model").render())
         assert "session session-" in str(app.query_one("#status-session").render())
+        assert app.query_one("#conversation").children[0].id == "brand"
         assert "Started a new empty session." in str(app.query_one(".notice").render())
 
 

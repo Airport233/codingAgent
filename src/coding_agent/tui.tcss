@@ -5,7 +5,7 @@ Screen {
 }
 
 #brand {
-    height: 9;
+    height: auto;
     padding: 1 2;
     background: #111821;
     color: #7dd3fc;

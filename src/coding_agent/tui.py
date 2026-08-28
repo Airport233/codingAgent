@@ -381,8 +381,8 @@ class CodingAgentTui(App[None]):
         self._last_history_text: str | None = None
 
     def compose(self) -> ComposeResult:
-        yield Static(self._welcome_text(), markup=False, id="brand")
-        yield VerticalScroll(id="conversation")
+        with VerticalScroll(id="conversation"):
+            yield Static(self._welcome_text(), markup=False, id="brand")
         with Horizontal(id="status-bar"):
             yield Label(self.model, id="status-model")
             yield Label(self.workspace, id="status-workspace")
@@ -690,6 +690,7 @@ class CodingAgentTui(App[None]):
                 return
             self._install_transition(transition)
             await self.query_one("#conversation", VerticalScroll).remove_children()
+            await self._mount_welcome()
             await self._notice("Started a new empty session.", "info")
         elif prompt == "/resume":
             if self._turn_worker is not None and self._turn_worker.is_running:
@@ -814,6 +815,7 @@ class CodingAgentTui(App[None]):
             composer.focus()
         self._install_transition(transition)
         await self.query_one("#conversation", VerticalScroll).remove_children()
+        await self._mount_welcome()
         self._prompt_history.clear()
         self._history_index = None
         self._last_history_text = None
@@ -823,6 +825,9 @@ class CodingAgentTui(App[None]):
         conversation = self.query_one("#conversation", VerticalScroll)
         await conversation.mount(widget)
         conversation.scroll_end(animate=False)
+
+    async def _mount_welcome(self) -> None:
+        await self._mount(Static(self._welcome_text(), markup=False, id="brand"))
 
     async def _notice(self, message: str, kind: str) -> None:
         await self._mount(Static(message, markup=False, classes=f"message notice {kind}"))
