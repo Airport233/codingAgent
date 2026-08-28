@@ -18,6 +18,7 @@ from coding_agent.providers.anthropic import AnthropicMessagesProvider
 from coding_agent.providers.base import Provider
 from coding_agent.providers.config import normalize_sdk_base_url
 from coding_agent.sessions.jsonl import JsonlSessionRepository, Redactor
+from coding_agent.skills import SkillLoader
 from coding_agent.tools.builtin import BuiltinToolSource
 from coding_agent.tools.catalog import ToolCatalog
 from coding_agent.tools.dispatcher import ToolDispatcher
@@ -311,6 +312,10 @@ async def create_runtime(
             mode=settings.approval_mode,
             guarded_tools=frozenset({"shell"}),
         ),
+        skills=SkillLoader.default(
+            user_dir=settings.data_root / "skills",
+            project_dir=project_root / ".coding-agent" / "skills",
+        ).load(),
     )
     return AgentRuntime(application, store.session_id, client)
 

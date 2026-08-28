@@ -26,6 +26,7 @@ from coding_agent.providers.fake import FakeProvider
 from coding_agent.runtime import RuntimeConfigurationError, RuntimeSettings, create_runtime
 from coding_agent.sessions.jsonl import Redactor
 from coding_agent.sessions.memory import InMemorySessionStore
+from coding_agent.skills import SkillDefinition, SkillSnapshot
 from coding_agent.tools.base import ToolOutput
 from coding_agent.tools.catalog import ToolCatalog
 from coding_agent.tools.dispatcher import ToolDispatcher
@@ -91,6 +92,38 @@ async def test_new_runtime_does_not_persist_an_empty_session(tmp_path: Path) -> 
     assert '"kind":"session_started"' in records[0]
     assert '"kind":"model_changed"' in records[1]
     assert '"kind":"user_exchange"' in records[2]
+
+
+@pytest.mark.asyncio
+async def test_runtime_loads_builtin_and_project_override_skills(tmp_path: Path) -> None:
+    project_skills = tmp_path / ".coding-agent" / "skills"
+    project_skills.mkdir(parents=True)
+    (project_skills / "test-fix.md").write_text(
+        '+++\nname = "test-fix"\ndescription = "Project-specific test workflow"\n'
+        "+++\n\nRun the project smoke test first.\n",
+        encoding="utf-8",
+    )
+    settings = RuntimeSettings.from_environment(
+        workspace=tmp_path,
+        model="example-model",
+        environ={
+            "CODING_AGENT_BASE_URL": "https://example.invalid/anthropic",
+            "CODING_AGENT_API_KEY": "private-test-credential",
+        },
+        data_root=tmp_path / "data",
+    )
+
+    runtime = await create_runtime(settings, provider=FakeProvider([]))
+
+    assert runtime.application.available_skills() == (
+        ("code-review", "Review code changes for concrete, actionable defects", "builtin"),
+        (
+            "project-map",
+            "Map a repository's entry points, architecture, tests, and workflows",
+            "builtin",
+        ),
+        ("test-fix", "Project-specific test workflow", "project"),
+    )
 
 
 def test_runtime_settings_load_user_provider_profile(tmp_path: Path) -> None:
@@ -487,6 +520,41 @@ async def test_repl_shows_shell_details_and_toggles_thinking() -> None:
     assert "[tool] shell [.] $ python -m unittest" in rendered
     assert "stdout:\nran python -m unittest" in rendered
     assert "[tool] shell done" in rendered
+
+
+@pytest.mark.asyncio
+async def test_repl_lists_and_runs_a_skill() -> None:
+    provider = FakeProvider([AssistantExchange((TextBlock("fixed"),), "end_turn")])
+    application = AgentApplication(
+        provider,
+        ToolDispatcher(ToolCatalog({})),
+        InMemorySessionStore(),
+        skills=SkillSnapshot(
+            (
+                SkillDefinition(
+                    "test-fix",
+                    "Fix a failing test",
+                    "Reproduce first.",
+                    "builtin",
+                    Path("test-fix.md"),
+                ),
+            )
+        ),
+    )
+    inputs: Iterator[str] = iter(("/skills", "/skill test-fix Fix the parser", "/exit"))
+    output: list[str] = []
+
+    async def read_input() -> str:
+        return next(inputs)
+
+    await run_repl(application, read_input=read_input, write_output=output.append)
+
+    rendered = "".join(output)
+    assert "test-fix" in rendered
+    assert "Fix a failing test" in rendered
+    assert "[skill] test-fix" in rendered
+    assert "fixed" in rendered
+    assert "Reproduce first." in provider.system_instructions[0]
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
@@ -27,6 +28,7 @@ from coding_agent.providers.base import ProviderEvent, ProviderResponseFinished
 from coding_agent.providers.fake import FakeProvider
 from coding_agent.sessions.jsonl import SessionSummary
 from coding_agent.sessions.memory import InMemorySessionStore
+from coding_agent.skills import SkillDefinition, SkillSnapshot
 from coding_agent.tools.base import ToolOutput, ToolSpec
 from coding_agent.tools.catalog import ToolCatalog
 from coding_agent.tools.dispatcher import ToolDispatcher
@@ -51,6 +53,8 @@ async def test_slash_help_uses_one_aligned_command_per_line() -> None:
         "  /context                 Show context usage",
         "  /compact                 Compact conversation context",
         "  /thinking                Toggle thinking details",
+        "  /skills                  List available coding workflows",
+        "  /skill <name> <task>     Run a task with a coding workflow",
         "  /resume                  Resume a saved session",
         "  /clear                   Start a new empty session",
         "  /exit                    Exit codingAgent",
@@ -62,6 +66,32 @@ def application_with_response(text: str = "Finished successfully.") -> AgentAppl
         FakeProvider([AssistantExchange((TextBlock(text),), "end_turn")]),
         ToolDispatcher(ToolCatalog({})),
         InMemorySessionStore(),
+    )
+
+
+def application_with_skills(text: str = "Skill completed.") -> AgentApplication:
+    return AgentApplication(
+        FakeProvider([AssistantExchange((TextBlock(text),), "end_turn")]),
+        ToolDispatcher(ToolCatalog({})),
+        InMemorySessionStore(),
+        skills=SkillSnapshot(
+            (
+                SkillDefinition(
+                    "code-review",
+                    "Review code changes",
+                    "Report concrete defects only.",
+                    "builtin",
+                    Path("code-review.md"),
+                ),
+                SkillDefinition(
+                    "test-fix",
+                    "Fix a failing test",
+                    "Reproduce the failure first.",
+                    "builtin",
+                    Path("test-fix.md"),
+                ),
+            )
+        ),
     )
 
 
@@ -545,6 +575,58 @@ async def test_slash_popup_handles_plain_completion_and_no_matches() -> None:
         composer.value = "/context extra"
         await pilot.pause()
         assert popup.display is False
+
+
+async def test_skills_command_lists_workflows_and_skill_command_runs_task() -> None:
+    app = CodingAgentTui(
+        application_with_skills(),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer", PromptTextArea)
+        composer.value = "/skills"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        notices = app.query(".notice")
+        listing = str(notices[-1].render())
+        assert "code-review" in listing
+        assert "test-fix" in listing
+        assert "builtin" in listing
+
+        composer.value = "/skill test-fix Fix the parser regression"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert "Fix the parser regression" in str(app.query_one(".user-message").render())
+        assert "test-fix" in str(app.query_one(".skill-boundary").render())
+        assert "Skill completed." in str(app.query_one(".assistant-message").render())
+
+
+async def test_skill_name_completion_uses_available_workflows() -> None:
+    app = CodingAgentTui(
+        application_with_skills(),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer", PromptTextArea)
+        choices = app.query_one("#completion-options", OptionList)
+        composer.value = "/skill te"
+        await pilot.pause()
+        await pilot.pause()
+
+        assert choices.option_count == 1
+        assert choices.get_option_at_index(0).id == "test-fix"
+        await pilot.press("tab")
+        await pilot.pause()
+        assert composer.value == "/skill test-fix "
 
 
 async def test_model_command_opens_secondary_picker_and_switches_selection() -> None:

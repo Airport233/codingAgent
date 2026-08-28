@@ -63,6 +63,12 @@ Screen {
     text-align: center;
 }
 
+.skill-boundary {
+    color: #7dd3fc;
+    background: #0c1b2a;
+    border-left: thick #38bdf8;
+}
+
 .succeeded {
     border-left: thick #34d399;
 }

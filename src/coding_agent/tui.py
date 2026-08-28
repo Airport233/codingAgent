@@ -52,6 +52,7 @@ from coding_agent.events import (
 )
 from coding_agent.runtime import RuntimeConfigurationError
 from coding_agent.sessions.jsonl import SessionSummary
+from coding_agent.skills import format_skill_list
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +81,8 @@ SLASH_COMMANDS = (
     SlashCommand("context", "Show context usage"),
     SlashCommand("compact", "Compact conversation context"),
     SlashCommand("thinking", "Toggle thinking details"),
+    SlashCommand("skills", "List available coding workflows"),
+    SlashCommand("skill", "Run a task with a coding workflow", "<name> <task>"),
     SlashCommand("resume", "Resume a saved session"),
     SlashCommand("clear", "Start a new empty session"),
     SlashCommand("exit", "Exit codingAgent"),
@@ -373,7 +376,7 @@ class CodingAgentTui(App[None]):
         self._thinking: tuple[Collapsible, Static] | None = None
         self._thinking_text = ""
         self._tools: dict[str, tuple[Collapsible, Static, str, str]] = {}
-        self._completion_mode: Literal["commands", "models"] | None = None
+        self._completion_mode: Literal["commands", "models", "skills"] | None = None
         self._completion_matches: list[str] = []
         self._dismissed_completion_value: str | None = None
         self._prompt_history: list[str] = []
@@ -415,16 +418,27 @@ class CodingAgentTui(App[None]):
         if prompt.startswith("/"):
             await self._command(prompt)
             return
+        await self._start_turn(prompt)
+
+    async def _start_turn(
+        self,
+        prompt: str,
+        *,
+        skill_name: str | None = None,
+        history_prompt: str | None = None,
+    ) -> None:
         if self._turn_worker is not None and self._turn_worker.is_running:
             await self._notice("A turn is already running. Press Ctrl+C to cancel it.", "warning")
             return
         await self._mount(Static(prompt, markup=False, classes="message user-message"))
-        self._prompt_history.append(prompt)
+        self._prompt_history.append(history_prompt or prompt)
         self._history_index = None
         self._last_history_text = None
-        event.text_area.disabled = True
+        self.query_one("#composer", PromptTextArea).disabled = True
         self._reset_turn_widgets()
-        self._turn_worker = self.run_worker(self._run_turn(prompt), group="agent", exclusive=True)
+        self._turn_worker = self.run_worker(
+            self._run_turn(prompt, skill_name=skill_name), group="agent", exclusive=True
+        )
 
     @on(TextArea.Changed, "#composer")
     def resize_composer(self, event: TextArea.Changed) -> None:
@@ -509,6 +523,19 @@ class CodingAgentTui(App[None]):
             matches = [model for model in models if query in model.casefold()]
             self._show_completion("models", matches)
             return
+        if first_line.startswith("/skill "):
+            remainder = first_line.removeprefix("/skill ")
+            if " " in remainder:
+                self._hide_completion()
+                return
+            query = remainder.casefold()
+            matches = [
+                name
+                for name, _description, _source in self.application.available_skills()
+                if query in name.casefold()
+            ]
+            self._show_completion("skills", matches)
+            return
         command_token = first_line[1:]
         if any(character.isspace() for character in command_token):
             self._hide_completion()
@@ -521,13 +548,21 @@ class CodingAgentTui(App[None]):
         ]
         self._show_completion("commands", matches)
 
-    def _show_completion(self, mode: Literal["commands", "models"], matches: list[str]) -> None:
+    def _show_completion(
+        self, mode: Literal["commands", "models", "skills"], matches: list[str]
+    ) -> None:
         popup = self.query_one("#completion-popup", Vertical)
         title = self.query_one("#completion-title", Label)
         choices = self.query_one("#completion-options", OptionList)
         self._completion_mode = mode
         self._completion_matches = matches
-        title.update("Commands" if mode == "commands" else "Choose model")
+        title.update(
+            "Commands"
+            if mode == "commands"
+            else "Choose model"
+            if mode == "models"
+            else "Choose skill"
+        )
         choices.clear_options()
         if mode == "commands":
             descriptions = {f"/{item.name}": item.description for item in SLASH_COMMANDS}
@@ -563,8 +598,8 @@ class CodingAgentTui(App[None]):
             return
         composer = self.query_one("#composer", PromptTextArea)
         if self._completion_mode == "commands":
-            if selected == "/model":
-                composer.value = "/model "
+            if selected in {"/model", "/skill"}:
+                composer.value = f"{selected} "
                 self._sync_completion(composer.value)
             elif complete_only:
                 composer.value = selected
@@ -581,13 +616,24 @@ class CodingAgentTui(App[None]):
                 composer.clear()
                 self._hide_completion()
                 await self._command(f"/model {selected}")
+        elif self._completion_mode == "skills":
+            composer.value = f"/skill {selected} "
+            self._hide_completion()
         composer.focus()
 
-    async def _run_turn(self, prompt: str) -> None:
+    async def _run_turn(self, prompt: str, *, skill_name: str | None = None) -> None:
         try:
-            async for event in self.application.run(prompt):
+            async for event in self.application.run(prompt, skill_name=skill_name):
                 if isinstance(event, AgentStarted):
                     self._refresh_session_metadata()
+                    if event.skill_name is not None:
+                        await self._mount(
+                            Static(
+                                f"Skill active · {event.skill_name}",
+                                markup=False,
+                                classes="message skill-boundary",
+                            )
+                        )
                 elif isinstance(event, ApprovalRequested):
                     self.push_screen(ApprovalScreen(event), self._approval_selected)
                 elif isinstance(event, TextDelta):
@@ -679,6 +725,28 @@ class CodingAgentTui(App[None]):
                 return
             self._install_transition(transition)
             await self._notice(f"Model switched to {self.model}.", "info")
+        elif prompt == "/skills":
+            await self._notice(
+                format_skill_list(
+                    self.application.available_skills(), self.application.skill_warnings()
+                ),
+                "info",
+            )
+        elif prompt == "/skill":
+            await self._notice("Usage: /skill <name> <task>", "warning")
+        elif prompt.startswith("/skill "):
+            parts = prompt.split(maxsplit=2)
+            if len(parts) < 3 or not parts[2].strip():
+                await self._notice("Usage: /skill <name> <task>", "warning")
+                return
+            skill_name, task = parts[1], parts[2].strip()
+            available = {
+                name for name, _description, _source in self.application.available_skills()
+            }
+            if skill_name not in available:
+                await self._notice(f"Unknown skill: {skill_name}. Use /skills.", "error")
+                return
+            await self._start_turn(task, skill_name=skill_name, history_prompt=prompt)
         elif prompt == "/clear":
             if self.clear_session is None:
                 await self._notice("Starting a new session is unavailable.", "error")

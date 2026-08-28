@@ -46,6 +46,7 @@ from coding_agent.providers.base import (
     ProviderThinkingDelta,
 )
 from coding_agent.sessions.base import SessionStore
+from coding_agent.skills import SkillDefinition, SkillSnapshot
 from coding_agent.tools.dispatcher import ToolDispatcher
 
 
@@ -63,6 +64,7 @@ class AgentApplication:
         display_redactor: Callable[[object], object] | None = None,
         initial_compactions: Sequence[CompactionRecord] = (),
         approval_policy: ApprovalPolicy | None = None,
+        skills: SkillSnapshot | None = None,
     ) -> None:
         self._provider = provider
         self._dispatcher = dispatcher
@@ -76,6 +78,7 @@ class AgentApplication:
         self._display_redactor = display_redactor or (lambda value: value)
         self._compaction_history = tuple(initial_compactions)
         self._approval_policy = approval_policy or ConfigurableApprovalPolicy()
+        self._skills = skills or SkillSnapshot(())
         self._pending_approvals: dict[str, asyncio.Future[ApprovalDecision]] = {}
         self._closed = False
 
@@ -105,6 +108,12 @@ class AgentApplication:
         """Return durable compaction events with their original transcript positions."""
         return self._compaction_history
 
+    def available_skills(self) -> tuple[tuple[str, str, str], ...]:
+        return tuple((skill.name, skill.description, skill.source) for skill in self._skills.skills)
+
+    def skill_warnings(self) -> tuple[str, ...]:
+        return self._skills.warnings
+
     async def resolve_approval(self, request_id: str, decision: ApprovalDecision) -> bool:
         pending = self._pending_approvals.get(request_id)
         if pending is None or pending.done():
@@ -115,11 +124,15 @@ class AgentApplication:
         pending.set_result(decision)
         return True
 
-    async def compact_context(self, reason: str = "manual") -> CompactionCheckpoint | None:
+    async def compact_context(
+        self, reason: str = "manual", active_skill: SkillDefinition | None = None
+    ) -> CompactionCheckpoint | None:
         if self._context_manager is None:
             return None
         history = self._conversation.snapshot()
-        supplemental_characters = self._supplemental_characters(self._load_system_instructions())
+        supplemental_characters = self._supplemental_characters(
+            self._load_system_instructions(active_skill)
+        )
         summarize = (
             None
             if self._context_manager.status(history, supplemental_characters).level == "hard"
@@ -133,10 +146,15 @@ class AgentApplication:
             supplemental_characters=supplemental_characters,
         )
 
-    def _load_system_instructions(self) -> str | None:
-        if self._memory_loader is None:
-            return None
-        return self._memory_loader.load().rendered or None
+    def _load_system_instructions(self, active_skill: SkillDefinition | None = None) -> str | None:
+        sections: list[str] = []
+        if self._memory_loader is not None:
+            memory = self._memory_loader.load().rendered
+            if memory:
+                sections.append(memory)
+        if active_skill is not None:
+            sections.append(active_skill.render_instructions())
+        return "\n\n".join(sections) or None
 
     def _supplemental_characters(self, system_instructions: str | None) -> int:
         tools = [
@@ -166,11 +184,23 @@ class AgentApplication:
             raise RuntimeError("Provider did not complete the context summary")
         return response.text
 
-    async def run(self, prompt: str) -> AsyncIterator[CoreEvent]:
+    async def run(self, prompt: str, *, skill_name: str | None = None) -> AsyncIterator[CoreEvent]:
+        active_skill = None if skill_name is None else self._skills.get(skill_name)
+        if skill_name is not None and active_skill is None:
+            yield AgentFailed(message=f"Unknown skill: {skill_name}")
+            return
+        if active_skill is not None:
+            await self._sessions.append(
+                "skill_invoked",
+                {"name": active_skill.name, "source": active_skill.source, "task": prompt},
+            )
         user_exchange = UserExchange(content=prompt)
         self._conversation.exchanges.append(user_exchange)
         await self._sessions.append("user_exchange", user_exchange)
-        yield AgentStarted(prompt=prompt)
+        yield AgentStarted(
+            prompt=prompt,
+            skill_name=active_skill.name if active_skill is not None else None,
+        )
         if self._context_reprojected:
             yield WarningRaised(
                 "Context was reprojected for the selected model; prior-model thinking was omitted"
@@ -179,7 +209,7 @@ class AgentApplication:
 
         for _step in range(self._max_steps):
             response: AssistantExchange | None = None
-            system_instructions = self._load_system_instructions()
+            system_instructions = self._load_system_instructions(active_skill)
             if self._memory_loader is not None:
                 memory = self._memory_loader.load()
                 if memory.digest != self._last_memory_digest:
@@ -205,7 +235,7 @@ class AgentApplication:
                 )
                 if status.level in {"soft", "hard"}:
                     try:
-                        await self.compact_context(reason="auto")
+                        await self.compact_context(reason="auto", active_skill=active_skill)
                     except Exception:
                         yield WarningRaised(
                             "Context compaction failed; continuing with the original context"
