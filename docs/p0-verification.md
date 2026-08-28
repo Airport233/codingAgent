@@ -44,3 +44,15 @@ uv run coding-agent --model claude-sonnet-4-6 --workspace .tmp/agent-acceptance-
 Submit the task from `.tmp/agent-acceptance-manual/TASK.md`, then exercise `/thinking`, `/context`,
 `/compact`, `/model`, `/clear`, and `/exit`. Never place Provider credentials or private endpoints
 in the command transcript.
+
+## Open manual findings
+
+Recorded on 2026-08-28 for follow-up on `feature/cli-hardening`:
+
+- In the tested macOS terminal, copy and paste currently work through `Ctrl+C`/`Ctrl+V`, but the
+  conventional `Command+C`/`Command+V` behavior is not yet verified as working end to end.
+- The TUI context label is refreshed before a Provider request, but not after the final assistant
+  exchange or a manual `/compact`; it can therefore lag behind the value recomputed by `/context`.
+- Manual compaction does install and use a projected history, but a Provider-generated summary is
+  not explicitly marked as a synthetic compaction summary for the next model. A model's answer to
+  questions about whether it saw a summary is therefore not reliable evidence of the request shape.
