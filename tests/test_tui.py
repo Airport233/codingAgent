@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import AsyncIterator
 
 import pytest
@@ -536,6 +537,7 @@ async def test_ctrl_c_copies_selected_conversation_text_when_idle(
         assert native_copies == ["Finished successfully."]
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Command+C is a macOS shortcut")
 async def test_command_c_copies_selected_composer_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
