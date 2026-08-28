@@ -5,10 +5,11 @@ import hashlib
 import json
 import os
 import re
+import threading
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -30,6 +31,22 @@ from coding_agent.domain import (
 
 _SCHEMA_VERSION = 1
 _SESSION_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+_TIMESTAMP_LOCK = threading.Lock()
+_LAST_EVENT_TIMESTAMP: datetime | None = None
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _next_event_timestamp() -> str:
+    global _LAST_EVENT_TIMESTAMP
+    with _TIMESTAMP_LOCK:
+        current = _utc_now()
+        if _LAST_EVENT_TIMESTAMP is not None and current <= _LAST_EVENT_TIMESTAMP:
+            current = _LAST_EVENT_TIMESTAMP + timedelta(microseconds=1)
+        _LAST_EVENT_TIMESTAMP = current
+    return current.isoformat()
 
 
 class SessionCorruptError(Exception):
@@ -133,7 +150,7 @@ class JsonlSessionStore:
                 "event_id": str(uuid.uuid4()),
                 "session_id": self.session_id,
                 "sequence": sequence,
-                "timestamp": datetime.now(UTC).isoformat(),
+                "timestamp": _next_event_timestamp(),
                 "kind": kind,
                 "payload": redacted_payload,
             }
@@ -272,7 +289,13 @@ class JsonlSessionRepository:
                     compacted=compaction is not None,
                 )
             )
-        return tuple(sorted(summaries, key=lambda item: item.updated_at, reverse=True))
+        return tuple(
+            sorted(
+                summaries,
+                key=lambda item: (item.updated_at, item.created_at, item.session_id),
+                reverse=True,
+            )
+        )
 
     async def _resume_path(self, latest: Path) -> RecoveredSession:
         events, warnings = _read_events(latest)

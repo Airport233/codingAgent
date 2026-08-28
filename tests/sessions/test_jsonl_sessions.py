@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+import coding_agent.sessions.jsonl as jsonl_module
 from coding_agent.domain import (
     AssistantExchange,
     RedactedThinkingBlock,
@@ -146,6 +148,15 @@ async def test_sessions_can_be_listed_and_resumed_by_id(
     other = await repository.create(other_project, session_id="other")
     await other.append("user_exchange", UserExchange("Must not be listed"))
 
+    tied_timestamp = "2026-08-29T00:00:00+00:00"
+    for store in (first, second):
+        events = [json.loads(line) for line in store.events_path.read_text().splitlines()]
+        for event in events:
+            event["timestamp"] = tied_timestamp
+        store.events_path.write_text(
+            "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
+        )
+
     summaries = await repository.list_sessions(project)
 
     assert [summary.session_id for summary in summaries] == ["second", "first"]
@@ -159,6 +170,26 @@ async def test_sessions_can_be_listed_and_resumed_by_id(
     assert recovered.store.session_id == "first"
     assert recovered.conversation[0] == UserExchange("  First\nconversation   title  ")
     assert await repository.resume(project, "other") is None
+
+
+@pytest.mark.asyncio
+async def test_event_timestamps_remain_ordered_when_the_wall_clock_stalls(
+    roots: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_root, project, _ = roots
+    frozen = datetime(2026, 8, 29, tzinfo=UTC)
+    monkeypatch.setattr(jsonl_module, "_utc_now", lambda: frozen)
+    repository = JsonlSessionRepository(data_root)
+
+    store = await repository.create(project, session_id="ordered")
+    await store.append("user_exchange", UserExchange("first"))
+    await store.append("user_exchange", UserExchange("second"))
+
+    timestamps = [
+        json.loads(line)["timestamp"] for line in store.events_path.read_text().splitlines()
+    ]
+    assert timestamps == sorted(timestamps)
+    assert len(timestamps) == len(set(timestamps))
 
 
 @pytest.mark.asyncio
