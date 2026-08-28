@@ -127,6 +127,63 @@ async def test_tui_renders_collapsible_thinking_and_completed_tool_card() -> Non
         assert "all green" in str(tool.query_one(".tool-body").render())
 
 
+async def test_tui_preserves_text_and_tool_chronology() -> None:
+    class ReadInput(BaseModel):
+        path: str
+
+    class ReadFile:
+        name = "read_file"
+        description = "Read a file"
+        input_model = ReadInput
+
+        async def execute(self, arguments: BaseModel) -> ToolOutput:
+            return ToolOutput("task contents")
+
+    provider = FakeProvider(
+        [
+            AssistantExchange(
+                (
+                    TextBlock("I will inspect the task."),
+                    ToolUseBlock("call-1", "read_file", {"path": "TASK.md"}),
+                ),
+                "tool_use",
+            ),
+            AssistantExchange((TextBlock("The task is complete."),), "end_turn"),
+        ]
+    )
+    app = CodingAgentTui(
+        AgentApplication(
+            provider,
+            ToolDispatcher(ToolCatalog({"read_file": ReadFile()})),
+            InMemorySessionStore(),
+        ),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        app.query_one("#composer").value = "Do the task"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        conversation = app.query_one("#conversation")
+        timeline = [
+            "user"
+            if child.has_class("user-message")
+            else "assistant"
+            if child.has_class("assistant-message")
+            else "tool"
+            if child.has_class("tool-card")
+            else "other"
+            for child in conversation.children
+        ]
+        assert timeline == ["user", "assistant", "tool", "assistant"]
+        replies = app.query(".assistant-message")
+        assert "I will inspect the task." in str(replies[0].render())
+        assert "The task is complete." in str(replies[1].render())
+
+
 async def test_tui_slash_commands_update_state_without_leaving_full_screen() -> None:
     initial = application_with_response()
     switched = application_with_response()
@@ -206,3 +263,23 @@ async def test_ctrl_c_cancels_active_provider_without_closing_tui() -> None:
 
         assert composer.disabled is False
         assert "turn_cancelled" in store.kinds
+
+
+async def test_ctrl_c_copies_selected_conversation_text_when_idle() -> None:
+    app = CodingAgentTui(
+        application_with_response(),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        app.query_one("#composer").value = "Fix the tests"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        app.query_one(".assistant-message").text_select_all()
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+
+        assert app.clipboard == "Finished successfully."

@@ -137,6 +137,7 @@ class CodingAgentTui(App[None]):
                     if self._thinking is not None:
                         self._thinking[0].title = "Thinking · complete"
                 elif isinstance(event, ToolStarted):
+                    self._finish_assistant_segment()
                     await self._tool_started(event)
                 elif isinstance(event, ToolFinished):
                     self._tool_finished(event)
@@ -277,6 +278,11 @@ class CodingAgentTui(App[None]):
         self._thinking_text = ""
         self._tools = {}
 
+    def _finish_assistant_segment(self) -> None:
+        """Make later text render after the event that ended this segment."""
+        self._assistant = None
+        self._assistant_text = ""
+
     async def action_toggle_thinking(self) -> None:
         self.thinking_visible = not self.thinking_visible
         if self._thinking is not None:
@@ -287,6 +293,10 @@ class CodingAgentTui(App[None]):
     def action_cancel_turn(self) -> None:
         if self._turn_worker is not None and self._turn_worker.is_running:
             self._turn_worker.cancel()
+            return
+        selected_text = self.screen.get_selected_text()
+        if selected_text:
+            self.copy_to_clipboard(selected_text)
 
     async def action_quit_agent(self) -> None:
         self.action_cancel_turn()
