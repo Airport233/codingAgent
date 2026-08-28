@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import ClassVar
@@ -45,7 +47,7 @@ class CodingAgentTui(App[None]):
     TITLE = "codingAgent"
     SUB_TITLE = "local coding agent"
     BINDINGS: ClassVar[list[BindingType]] = [
-        Binding("ctrl+c", "cancel_turn", "Cancel turn", show=True),
+        Binding("ctrl+c", "cancel_turn", "Cancel / copy", show=True, priority=True),
         Binding("ctrl+q", "quit_agent", "Quit", show=True),
         Binding("ctrl+t", "toggle_thinking", "Thinking", show=True),
     ]
@@ -290,16 +292,18 @@ class CodingAgentTui(App[None]):
         state = "shown" if self.thinking_visible else "hidden"
         await self._notice(f"Thinking details: {state}.", "info")
 
-    def action_cancel_turn(self) -> None:
+    async def action_cancel_turn(self) -> None:
         if self._turn_worker is not None and self._turn_worker.is_running:
             self._turn_worker.cancel()
             return
         selected_text = self.screen.get_selected_text()
         if selected_text:
             self.copy_to_clipboard(selected_text)
+            await _copy_to_macos_clipboard(selected_text)
 
     async def action_quit_agent(self) -> None:
-        self.action_cancel_turn()
+        if self._turn_worker is not None and self._turn_worker.is_running:
+            self._turn_worker.cancel()
         await self.application.close_session()
         self.exit()
 
@@ -311,3 +315,19 @@ def _tool_title(event: ToolStarted) -> str:
         return f"shell [{cwd}] $ {command}" if isinstance(command, str) else "shell"
     path = event.arguments.get("path")
     return f"{event.tool_name} · {path}" if isinstance(path, str) else event.tool_name
+
+
+async def _copy_to_macos_clipboard(text: str) -> None:
+    """Use the native clipboard where OSC 52 is unsupported by Apple Terminal."""
+    if sys.platform != "darwin":
+        return
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "pbcopy",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(process.communicate(text.encode()), timeout=2)
+    except (OSError, TimeoutError):
+        return

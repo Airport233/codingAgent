@@ -7,6 +7,7 @@ import pytest
 from pydantic import BaseModel
 from textual.widgets import Collapsible
 
+import coding_agent.tui as tui_module
 from coding_agent.application import AgentApplication
 from coding_agent.domain import (
     AssistantExchange,
@@ -265,7 +266,15 @@ async def test_ctrl_c_cancels_active_provider_without_closing_tui() -> None:
         assert "turn_cancelled" in store.kinds
 
 
-async def test_ctrl_c_copies_selected_conversation_text_when_idle() -> None:
+async def test_ctrl_c_copies_selected_conversation_text_when_idle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native_copies: list[str] = []
+
+    async def copy_native(text: str) -> None:
+        native_copies.append(text)
+
+    monkeypatch.setattr(tui_module, "_copy_to_macos_clipboard", copy_native)
     app = CodingAgentTui(
         application_with_response(),
         model="provider/model",
@@ -283,3 +292,4 @@ async def test_ctrl_c_copies_selected_conversation_text_when_idle() -> None:
         await pilot.pause()
 
         assert app.clipboard == "Finished successfully."
+        assert native_copies == ["Finished successfully."]
