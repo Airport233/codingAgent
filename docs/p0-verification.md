@@ -5,10 +5,10 @@ repository-wide quality command is the GitHub Actions `CI` workflow on macOS and
 
 | Requirement | Evidence |
 | --- | --- |
-| FR-CLI-001–003 | `tests/test_project_scaffold.py`, `test_repl_accepts_multiple_turns_and_compacts_context` |
-| FR-CLI-004–005A | `test_repl_shows_shell_details_and_toggles_thinking`, `test_repl_hides_thinking_content_by_default` |
+| FR-CLI-001–003 | `tests/test_project_scaffold.py`, `tests/test_tui.py` |
+| FR-CLI-004–005A | `test_tui_renders_collapsible_thinking_and_completed_tool_card`, `test_tui_slash_commands_update_state_without_leaving_full_screen` |
 | FR-CLI-006 | `test_runtime_settings_use_environment_without_exposing_private_values` |
-| FR-CLI-007 | `test_cancelling_a_running_tool_is_recorded_before_propagation`, `test_cancelling_a_provider_request_keeps_the_session_usable` |
+| FR-CLI-007 | `test_ctrl_c_cancels_active_provider_without_closing_tui`, `test_cancelling_a_running_tool_is_recorded_before_propagation` |
 | FR-PROV-001–006 | `test_runtime_settings_load_user_provider_profile`, `test_repl_lists_and_switches_models_then_starts_a_new_session` |
 | FR-PROV-007, FR-PROV-010–012 | `tests/providers/`, `test_runtime_resume_with_new_model_excludes_old_thinking_from_requests` |
 | FR-AGENT-001–007 | `tests/test_walking_skeleton.py`, including multi-tool, cancellation and recoverable-error cases |
@@ -25,19 +25,17 @@ repository-wide quality command is the GitHub Actions `CI` workflow on macOS and
 
 ## Manual acceptance
 
-On 2026-08-28, an initial live run with the configured Anthropic-compatible Provider completed the
-failing-discount task, but it also exposed that a nested `--workspace` was incorrectly widened to
-its parent Git repository. That run does not count as an isolated acceptance result. The workspace
-boundary and session identity were corrected and covered by a cross-platform regression test. A
-post-fix live rerun was blocked before inference by the gateway reporting that the configured model
-identifier was invalid, so the isolated live acceptance below remains pending. The tracked failing
-fixture was restored and still fails its percentage-discount test as intended.
+On 2026-08-28, the full-screen TUI completed the failing-discount task in an isolated workspace
+using the configured Anthropic-compatible Provider and `claude-sonnet-4-6`. The agent read the task,
+fixed only the production calculation, and the three fixture tests passed in an independent rerun.
+The run also verified full-screen rendering, collapsible tool cards, a persistent composer, and clean
+exit with Ctrl+Q. The tracked failing fixture remains unchanged and still fails as intended.
 
 Use an isolated copy for subsequent runs:
 
 ```bash
 uv run python scripts/prepare_acceptance_project.py .tmp/agent-acceptance-manual
-uv run coding-agent --model claude-sonnet-5 --workspace .tmp/agent-acceptance-manual
+uv run coding-agent --model claude-sonnet-4-6 --workspace .tmp/agent-acceptance-manual
 ```
 
 Submit the task from `.tmp/agent-acceptance-manual/TASK.md`, then exercise `/thinking`, `/context`,

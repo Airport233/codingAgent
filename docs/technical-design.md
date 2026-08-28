@@ -14,8 +14,8 @@
 | 模型 SDK | Anthropic 官方 Python SDK | Anthropic Messages HTTP/SSE 通信 | 允许使用厂商客户端库；只使用底层 Messages/stream 接口 |
 | 数据校验 | Pydantic 2 | 配置、工具参数、内部边界对象 | 能生成 JSON Schema，并提供清晰校验错误 |
 | CLI 参数 | Typer | 启动参数和非交互命令 | 类型化命令定义，帮助信息清晰 |
-| 交互输入 | prompt_toolkit | 多行输入、历史、快捷键 | 适合终端滚动式交互，不强制全屏 TUI |
-| 终端渲染 | Rich | Markdown、颜色、工具状态、差异和进度 | Windows Terminal 与 macOS 终端兼容 |
+| 全屏 TUI | Textual | 会话滚动、布局、输入、键盘事件和 TCSS 样式 | Python 原生、可测试，兼容 Windows Terminal 与 macOS 终端 |
+| 非交互渲染 | Rich | `--prompt` 模式和启动错误输出 | 适合 stdout 管道、日志和视频验收 |
 | 用户目录 | platformdirs | 配置、数据、缓存和日志路径 | 避免手写平台路径分支 |
 | 测试 | pytest + pytest-asyncio | 单元、异步和集成测试 | 支持 TDD 与异步 Agent 流程 |
 | 代码质量 | Ruff + Pyright | 格式、Lint、静态类型检查 | 反馈快，适合 CI |
@@ -213,12 +213,13 @@ MVP 不实现 MCP 传输，也不开放 MCP 端口。工具目录使用 `ToolSou
 
 ### 7.1 交互形态
 
-首版采用终端滚动式 CLI，不使用全屏 alternate screen：
+默认交互模式使用 Textual 的全屏 alternate screen：
 
 - Typer 解析启动参数；
-- prompt_toolkit 提供多行输入、历史和快捷键；
-- Rich 渲染 Markdown、状态、工具调用和错误；
-- 核心事件通过异步队列交给 CLI 渲染器。
+- Textual 提供可滚动会话区、常驻输入区、状态栏、键盘事件和 TCSS 样式；
+- thinking 和工具详情使用可折叠组件，运行状态与结果在同一组件内更新；
+- 核心事件由 TUI 异步 worker 消费，不阻塞输入与取消事件；
+- `--prompt` 保留 Rich/stdout 非交互适配器，不启动全屏界面。
 
 CLI 不解析 Provider 协议、不执行工具、不修改会话数据。它只提交用户命令并消费核心事件。
 
@@ -322,7 +323,7 @@ expected_file_hash
 - 单元测试：纯函数、模型、状态机和错误分类。
 - 集成测试：使用 FakeProvider 串起 Agent 循环与真实临时文件工具。
 - 契约测试：用户显式运行，访问百炼或公司端点；默认 CI 不运行。
-- CLI 测试：输入命令、取消和事件渲染的最小行为，不做脆弱的全屏快照。
+- CLI 测试：使用 Textual pilot 验证布局、输入、事件渲染、折叠和取消；不做依赖终端尺寸和色值的脆弱全屏快照。
 
 ### 12.2 P0 测试清单
 

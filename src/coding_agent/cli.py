@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
 import typer
-from prompt_toolkit import PromptSession
 from rich.console import Console
 
 from coding_agent.application import AgentApplication
@@ -30,15 +28,7 @@ from coding_agent.runtime import (
     RuntimeSettings,
     create_runtime,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class CliTransition:
-    application: AgentApplication
-    model: str
-    session_id: str
-    available_models: tuple[str, ...]
-
+from coding_agent.tui import CliTransition, CodingAgentTui
 
 type TransitionCallback = Callable[[str | None], Awaitable[CliTransition]]
 
@@ -229,7 +219,12 @@ async def run_repl(
 def _format_tool_call(event: ToolStarted) -> str:
     if event.tool_name == "shell":
         command = event.arguments.get("command")
-        return f"shell $ {command}" if isinstance(command, str) else "shell"
+        if not isinstance(command, str):
+            return "shell"
+        cwd = event.arguments.get("cwd", ".")
+        timeout = event.arguments.get("timeout_seconds")
+        suffix = f" (timeout={timeout}s)" if isinstance(timeout, (int, float)) else ""
+        return f"shell [{cwd}] $ {command}{suffix}"
     path = event.arguments.get("path")
     if isinstance(path, str):
         if event.tool_name == "edit_file":
@@ -311,22 +306,16 @@ async def _run_cli(
             )
             return
 
-        session: PromptSession[str] = PromptSession()
-
-        async def read_interactive() -> str:
-            return await session.prompt_async("coding-agent> ")
-
-        console.print(_status_line(current_settings, runtime.application, runtime.session_id))
-        await run_repl(
+        tui = CodingAgentTui(
             runtime.application,
-            read_input=read_interactive,
-            write_output=lambda value: write_console(console, value),
             model=current_settings.model_key,
+            workspace=str(current_settings.workspace),
             session_id=runtime.session_id,
             available_models=current_settings.available_models,
             switch_model=switch_model,
             clear_session=clear_session,
         )
+        await tui.run_async()
     finally:
         await runtime.aclose()
 

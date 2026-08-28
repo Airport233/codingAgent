@@ -449,7 +449,7 @@ async def test_repl_shows_shell_details_and_toggles_thinking() -> None:
     assert "Thinking details: shown." in rendered
     assert "[thinking] inspect carefully" in rendered
     assert "must-not-be-rendered" not in rendered
-    assert "[tool] shell $ python -m unittest" in rendered
+    assert "[tool] shell [.] $ python -m unittest" in rendered
     assert "stdout:\nran python -m unittest" in rendered
     assert "[tool] shell done" in rendered
 

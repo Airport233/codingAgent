@@ -656,7 +656,7 @@ feature/context ─────────────> feature/cli
 | 语言 | Python 3.12+ | TypeScript | 交付速度、工具与测试实现效率 |
 | Provider | Anthropic Messages 兼容适配器 | OpenAI Chat Completions 作为核心 | 与实际百炼/公司端点一致，thinking/tool block 更明确 |
 | Agent 循环 | 自研状态机 | SDK Tool Runner/Agent 框架 | 题目要求且便于验证重要逻辑 |
-| UI | 滚动式 CLI | 首版全屏 TUI/Web | 降低交付风险，保留事件接口 |
+| UI | Textual 全屏 TUI + stdout 非交互模式 | Web | 满足现代 coding agent 交互体验，同时保留脚本化与稳定事件接口 |
 | 工具执行 | MVP 串行 | 自动并行 | 避免写入和命令顺序竞态 |
 | 编辑 | 行范围 + 原文 + 文件哈希 | 全文覆写/apply_patch | 精确、可检测冲突、实现规模可控 |
 | 持久化 | JSONL 事件日志 | SQLite | 可检查、易恢复、迁移成本低 |
