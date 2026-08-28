@@ -69,6 +69,12 @@ Screen {
     border-left: thick #38bdf8;
 }
 
+.plan-card {
+    color: #d7dde5;
+    background: #0f1720;
+    border: round #38bdf8;
+}
+
 .succeeded {
     border-left: thick #34d399;
 }

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from coding_agent.plan import PlanStep
+
 
 @dataclass(frozen=True, slots=True)
 class AgentStarted:
@@ -34,6 +36,12 @@ class ContextUsageChanged:
     used_tokens: int
     context_window: int
     level: str
+
+
+@dataclass(frozen=True, slots=True)
+class PlanUpdated:
+    steps: tuple[PlanStep, ...]
+    explanation: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +104,7 @@ type CoreEvent = (
     | ThinkingDelta
     | ThinkingFinished
     | ContextUsageChanged
+    | PlanUpdated
     | ToolStarted
     | ToolFinished
     | AgentCompleted

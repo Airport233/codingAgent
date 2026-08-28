@@ -14,6 +14,7 @@ from coding_agent.application import AgentApplication
 from coding_agent.approval import ApprovalMode, ConfigurableApprovalPolicy
 from coding_agent.context import ContextBudget, ContextManager, TokenEstimator
 from coding_agent.memory.loader import ProjectMemoryLoader
+from coding_agent.plan import PlanState
 from coding_agent.providers.anthropic import AnthropicMessagesProvider
 from coding_agent.providers.base import Provider
 from coding_agent.providers.config import normalize_sdk_base_url
@@ -283,8 +284,15 @@ async def create_runtime(
             supports_tools=settings.supports_tools,
         )
 
+    plan_state = PlanState(recovered.plan if recovered is not None else ())
     catalog = await ToolCatalog.create(
-        (BuiltinToolSource(workspace_root, shell_config=ShellConfig(mode=settings.approval_mode)),)
+        (
+            BuiltinToolSource(
+                workspace_root,
+                shell_config=ShellConfig(mode=settings.approval_mode),
+                plan_state=plan_state,
+            ),
+        )
     )
     context_manager = ContextManager(
         ContextBudget(
@@ -316,6 +324,7 @@ async def create_runtime(
             user_dir=settings.data_root / "skills",
             project_dir=project_root / ".coding-agent" / "skills",
         ).load(),
+        plan_state=plan_state,
     )
     return AgentRuntime(application, store.session_id, client)
 

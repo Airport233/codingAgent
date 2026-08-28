@@ -30,6 +30,7 @@ from coding_agent.events import (
     ApprovalRequested,
     ContextUsageChanged,
     CoreEvent,
+    PlanUpdated,
     TextDelta,
     ThinkingDelta,
     ThinkingFinished,
@@ -39,6 +40,7 @@ from coding_agent.events import (
     WarningRaised,
 )
 from coding_agent.memory.loader import ProjectMemoryLoader
+from coding_agent.plan import PlanState, PlanStep
 from coding_agent.providers.base import (
     Provider,
     ProviderResponseFinished,
@@ -65,6 +67,7 @@ class AgentApplication:
         initial_compactions: Sequence[CompactionRecord] = (),
         approval_policy: ApprovalPolicy | None = None,
         skills: SkillSnapshot | None = None,
+        plan_state: PlanState | None = None,
     ) -> None:
         self._provider = provider
         self._dispatcher = dispatcher
@@ -79,6 +82,7 @@ class AgentApplication:
         self._compaction_history = tuple(initial_compactions)
         self._approval_policy = approval_policy or ConfigurableApprovalPolicy()
         self._skills = skills or SkillSnapshot(())
+        self._plan_state = plan_state or PlanState()
         self._pending_approvals: dict[str, asyncio.Future[ApprovalDecision]] = {}
         self._closed = False
 
@@ -113,6 +117,9 @@ class AgentApplication:
 
     def skill_warnings(self) -> tuple[str, ...]:
         return self._skills.warnings
+
+    def current_plan(self) -> tuple[PlanStep, ...]:
+        return self._plan_state.snapshot()
 
     async def resolve_approval(self, request_id: str, decision: ApprovalDecision) -> bool:
         pending = self._pending_approvals.get(request_id)
@@ -154,6 +161,9 @@ class AgentApplication:
                 sections.append(memory)
         if active_skill is not None:
             sections.append(active_skill.render_instructions())
+        plan = self._plan_state.render_context()
+        if plan:
+            sections.append(plan)
         return "\n\n".join(sections) or None
 
     def _supplemental_characters(self, system_instructions: str | None) -> int:
@@ -474,6 +484,18 @@ class AgentApplication:
                         content=self._redacted_text(result.content),
                         metadata=self._redacted_mapping(result.metadata),
                     )
+                    if call.name == "update_plan" and not result.is_error:
+                        explanation = result.metadata.get("explanation", "")
+                        explanation = explanation if isinstance(explanation, str) else ""
+                        steps = self._plan_state.snapshot()
+                        await self._sessions.append(
+                            "plan_updated",
+                            {
+                                "explanation": explanation,
+                                "plan": [step.as_dict() for step in steps],
+                            },
+                        )
+                        yield PlanUpdated(steps, explanation)
                 continuation = ToolContinuationExchange(
                     assistant=response,
                     results=tuple(results),

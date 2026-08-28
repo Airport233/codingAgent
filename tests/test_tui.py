@@ -24,6 +24,7 @@ from coding_agent.domain import (
     ToolUseBlock,
     UserExchange,
 )
+from coding_agent.plan import PlanState, PlanStep
 from coding_agent.providers.base import ProviderEvent, ProviderResponseFinished
 from coding_agent.providers.fake import FakeProvider
 from coding_agent.sessions.jsonl import SessionSummary
@@ -32,6 +33,7 @@ from coding_agent.skills import SkillDefinition, SkillSnapshot
 from coding_agent.tools.base import ToolOutput, ToolSpec
 from coding_agent.tools.catalog import ToolCatalog
 from coding_agent.tools.dispatcher import ToolDispatcher
+from coding_agent.tools.plan import UpdatePlanTool
 from coding_agent.tui import (
     ApprovalScreen,
     CliTransition,
@@ -722,6 +724,103 @@ async def test_tui_renders_collapsible_thinking_and_completed_tool_card() -> Non
         assert '"command": "uv run pytest"' in str(tool.query_one(".tool-body").render())
         assert "Result:" in str(tool.query_one(".tool-body").render())
         assert "all green" in str(tool.query_one(".tool-body").render())
+
+
+async def test_tui_renders_live_plan_card_from_update_plan_tool() -> None:
+    state = PlanState()
+    provider = FakeProvider(
+        [
+            AssistantExchange(
+                (
+                    ToolUseBlock(
+                        "plan-call",
+                        "update_plan",
+                        {
+                            "explanation": "Track implementation",
+                            "plan": [
+                                {"step": "Inspect", "status": "completed"},
+                                {"step": "Implement", "status": "in_progress"},
+                                {"step": "Verify", "status": "pending"},
+                            ],
+                        },
+                    ),
+                ),
+                "tool_use",
+            ),
+            AssistantExchange(
+                (
+                    ToolUseBlock(
+                        "plan-call-2",
+                        "update_plan",
+                        {
+                            "explanation": "Implementation finished",
+                            "plan": [
+                                {"step": "Inspect", "status": "completed"},
+                                {"step": "Implement", "status": "completed"},
+                                {"step": "Verify", "status": "in_progress"},
+                            ],
+                        },
+                    ),
+                ),
+                "tool_use",
+            ),
+            AssistantExchange((TextBlock("following the plan"),), "end_turn"),
+        ]
+    )
+    app = CodingAgentTui(
+        AgentApplication(
+            provider,
+            ToolDispatcher(ToolCatalog({"update_plan": UpdatePlanTool(state)})),
+            InMemorySessionStore(),
+            plan_state=state,
+        ),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        app.query_one("#composer", PromptTextArea).value = "Implement the feature"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        cards = app.query(".plan-card")
+        assert len(cards) == 1
+        card = cards[0]
+        rendered = str(card.render())
+        assert "Plan · 2/3 completed" in rendered
+        assert "✓ Inspect" in rendered
+        assert "✓ Implement" in rendered
+        assert "→ Verify" in rendered
+
+
+async def test_tui_renders_recovered_plan_after_history() -> None:
+    state = PlanState(
+        (
+            PlanStep("Inspect", "completed"),
+            PlanStep("Verify", "in_progress"),
+        )
+    )
+    app = CodingAgentTui(
+        AgentApplication(
+            FakeProvider([]),
+            ToolDispatcher(ToolCatalog({})),
+            InMemorySessionStore(),
+            initial_exchanges=(UserExchange("Historical task"),),
+            plan_state=state,
+        ),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        conversation = app.query_one("#conversation")
+        assert conversation.children[-1].has_class("plan-card")
+        assert "Plan · recovered" in str(conversation.children[-1].render())
 
 
 async def test_tui_replays_full_history_with_compaction_boundary_and_tool_inputs() -> None:

@@ -28,6 +28,7 @@ from coding_agent.domain import (
     UnknownProviderBlock,
     UserExchange,
 )
+from coding_agent.plan import PlanState, PlanStep
 
 _SCHEMA_VERSION = 1
 _SESSION_ID = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -112,6 +113,7 @@ class RecoveredSession:
     model: str | None = None
     conversation_models: tuple[str | None, ...] = ()
     compactions: tuple[CompactionRecord, ...] = ()
+    plan: tuple[PlanStep, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -340,6 +342,7 @@ class JsonlSessionRepository:
             model,
             tuple(conversation_models),
             tuple(compactions),
+            _restore_plan(events),
         )
 
 
@@ -348,6 +351,19 @@ def _project_key(project_root: Path) -> str:
     if os.name == "nt":
         normalized = normalized.casefold()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+
+
+def _restore_plan(events: Sequence[SessionEvent]) -> tuple[PlanStep, ...]:
+    state = PlanState()
+    for event in events:
+        if event.kind != "plan_updated":
+            continue
+        payload = _require_mapping(event.payload, "plan update")
+        try:
+            state.restore(payload.get("plan"))
+        except ValueError as error:
+            raise SessionCorruptError("Stored plan update is invalid") from error
+    return state.snapshot()
 
 
 def _read_events(

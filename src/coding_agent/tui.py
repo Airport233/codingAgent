@@ -42,6 +42,7 @@ from coding_agent.events import (
     AgentStarted,
     ApprovalRequested,
     ContextUsageChanged,
+    PlanUpdated,
     TextDelta,
     ThinkingDelta,
     ThinkingFinished,
@@ -50,6 +51,7 @@ from coding_agent.events import (
     ToolStarted,
     WarningRaised,
 )
+from coding_agent.plan import PlanStep
 from coding_agent.runtime import RuntimeConfigurationError
 from coding_agent.sessions.jsonl import SessionSummary
 from coding_agent.skills import format_skill_list
@@ -376,6 +378,7 @@ class CodingAgentTui(App[None]):
         self._thinking: tuple[Collapsible, Static] | None = None
         self._thinking_text = ""
         self._tools: dict[str, tuple[Collapsible, Static, str, str]] = {}
+        self._plan_card: Static | None = None
         self._completion_mode: Literal["commands", "models", "skills"] | None = None
         self._completion_matches: list[str] = []
         self._dismissed_completion_value: str | None = None
@@ -670,6 +673,8 @@ class CodingAgentTui(App[None]):
                     self.query_one("#status-context", Label).update(
                         f"context ~{event.used_tokens}/{event.context_window} · {event.level}"
                     )
+                elif isinstance(event, PlanUpdated):
+                    await self._render_plan(event.steps, explanation=event.explanation)
                 elif isinstance(event, AgentFailed):
                     await self._notice(event.message, "error")
                 elif isinstance(event, (AgentCancelled, WarningRaised)):
@@ -758,6 +763,7 @@ class CodingAgentTui(App[None]):
                 return
             self._install_transition(transition)
             await self.query_one("#conversation", VerticalScroll).remove_children()
+            self._plan_card = None
             await self._mount_welcome()
             await self._notice("Started a new empty session.", "info")
         elif prompt == "/resume":
@@ -883,6 +889,7 @@ class CodingAgentTui(App[None]):
             composer.focus()
         self._install_transition(transition)
         await self.query_one("#conversation", VerticalScroll).remove_children()
+        self._plan_card = None
         await self._mount_welcome()
         self._prompt_history.clear()
         self._history_index = None
@@ -943,8 +950,6 @@ class CodingAgentTui(App[None]):
 
     async def _render_recovered_history(self) -> None:
         history = self.application.conversation_history()
-        if not history:
-            return
         compactions_by_index: dict[int, list[CompactionRecord]] = {}
         for record in self.application.compaction_history():
             compactions_by_index.setdefault(record.exchange_index, []).append(record)
@@ -957,6 +962,30 @@ class CodingAgentTui(App[None]):
             await self._render_recovered_exchange(exchange)
         for record in compactions_by_index.get(len(history), ()):
             await self._mount_compaction_record(record)
+        plan = self.application.current_plan()
+        if plan:
+            await self._render_plan(plan, recovered=True)
+
+    async def _render_plan(
+        self,
+        steps: tuple[PlanStep, ...],
+        *,
+        explanation: str = "",
+        recovered: bool = False,
+    ) -> None:
+        completed = sum(step.status == "completed" for step in steps)
+        title = "Plan · recovered" if recovered else f"Plan · {completed}/{len(steps)} completed"
+        icons = {"completed": "✓", "in_progress": "→", "pending": "○"}
+        lines = [title]
+        if explanation:
+            lines.append(explanation)
+        lines.extend(f"{icons[step.status]} {step.step}" for step in steps)
+        content = "\n".join(lines)
+        if self._plan_card is not None and self._plan_card.is_mounted:
+            self._plan_card.update(content)
+            return
+        self._plan_card = Static(content, markup=False, classes="message plan-card")
+        await self._mount(self._plan_card)
 
     async def _mount_compaction_record(self, record: CompactionRecord) -> None:
         payload = record.payload

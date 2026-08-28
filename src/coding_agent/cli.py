@@ -17,6 +17,7 @@ from coding_agent.events import (
     AgentStarted,
     ApprovalRequested,
     ContextUsageChanged,
+    PlanUpdated,
     TextDelta,
     ThinkingDelta,
     ThinkingFinished,
@@ -236,6 +237,9 @@ async def run_repl(
                         f"[context] {event.used_tokens}/{event.context_window} "
                         f"tokens ({event.level})\n"
                     )
+            elif isinstance(event, PlanUpdated):
+                completed = sum(step.status == "completed" for step in event.steps)
+                write_output(f"[plan] {completed}/{len(event.steps)} completed\n")
             elif isinstance(event, ApprovalRequested):
                 operation = event.arguments.get("command", event.arguments)
                 write_output(

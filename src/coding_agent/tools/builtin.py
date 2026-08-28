@@ -5,8 +5,10 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, model_validator
 
+from coding_agent.plan import PlanState
 from coding_agent.tools.base import RecoverableToolError, Tool, ToolOutput
 from coding_agent.tools.files import EditFileTool, MkdirTool, WriteFileTool
+from coding_agent.tools.plan import UpdatePlanTool
 from coding_agent.tools.search import CodeSearchTool
 from coding_agent.tools.shell import ShellConfig, ShellTool
 from coding_agent.tools.workspace import ReadSet, WorkspaceGuard
@@ -76,10 +78,17 @@ class ReadFileTool:
 class BuiltinToolSource:
     source_id = "builtin"
 
-    def __init__(self, workspace: Path, *, shell_config: ShellConfig | None = None) -> None:
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        shell_config: ShellConfig | None = None,
+        plan_state: PlanState | None = None,
+    ) -> None:
         self._workspace = workspace
         self._read_set = ReadSet()
         self._shell_config = shell_config
+        self._plan_state = plan_state or PlanState()
 
     async def list_tools(self) -> tuple[Tool, ...]:
         return (
@@ -89,4 +98,5 @@ class BuiltinToolSource:
             MkdirTool(self._workspace),
             EditFileTool(self._workspace, self._read_set),
             ShellTool(self._workspace, self._shell_config),
+            UpdatePlanTool(self._plan_state),
         )
