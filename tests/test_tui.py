@@ -113,6 +113,54 @@ async def test_shift_enter_adds_newline_and_enter_submits_multiline_prompt() -> 
         assert "First line\nSecond line" in str(app.query_one(".user-message").render())
 
 
+async def test_empty_composer_navigates_prompt_history_and_text_arrows_move_to_edges() -> None:
+    provider = FakeProvider(
+        [
+            AssistantExchange((TextBlock("First response"),), "end_turn"),
+            AssistantExchange((TextBlock("Second response"),), "end_turn"),
+        ]
+    )
+    app = CodingAgentTui(
+        AgentApplication(
+            provider,
+            ToolDispatcher(ToolCatalog({})),
+            InMemorySessionStore(),
+        ),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer", PromptTextArea)
+        for prompt in ("First prompt", "Second prompt"):
+            composer.value = prompt
+            await pilot.press("enter")
+            await pilot.pause()
+
+        await pilot.press("up")
+        await pilot.pause()
+        assert composer.value == "Second prompt"
+
+        composer.clear()
+        await pilot.press("up")
+        await pilot.pause()
+        assert composer.value == "First prompt"
+
+        composer.clear()
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.value == "Second prompt"
+
+        composer.value = "First line\nSecond line"
+        await pilot.press("up")
+        await pilot.pause()
+        assert composer.cursor_location == (0, 0)
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.cursor_location == (1, len("Second line"))
+
+
 async def test_slash_popup_filters_navigates_completes_and_dismisses() -> None:
     app = CodingAgentTui(
         application_with_response(),
@@ -486,3 +534,30 @@ async def test_ctrl_c_copies_selected_conversation_text_when_idle(
 
         assert app.clipboard == "Finished successfully."
         assert native_copies == ["Finished successfully."]
+
+
+async def test_command_c_copies_selected_composer_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native_copies: list[str] = []
+
+    async def copy_native(text: str) -> None:
+        native_copies.append(text)
+
+    monkeypatch.setattr(tui_module, "_copy_to_macos_clipboard", copy_native)
+    app = CodingAgentTui(
+        application_with_response(),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer", PromptTextArea)
+        composer.value = "copy this input"
+        composer.select_all()
+        await pilot.press("super+c")
+        await pilot.pause()
+
+        assert app.clipboard == "copy this input"
+        assert native_copies == ["copy this input"]

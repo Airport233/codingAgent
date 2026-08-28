@@ -93,6 +93,11 @@ class PromptTextArea(TextArea):
             super().__init__()
             self.action = action
 
+    class NavigationAction(Message):
+        def __init__(self, direction: Literal["up", "down"]):
+            super().__init__()
+            self.direction = direction
+
     @property
     def value(self) -> str:
         return self.text
@@ -116,13 +121,13 @@ class PromptTextArea(TextArea):
         if self.completion_active:
             self.post_message(self.CompletionAction("up"))
         else:
-            self.action_cursor_up()
+            self.post_message(self.NavigationAction("up"))
 
     def action_completion_down(self) -> None:
         if self.completion_active:
             self.post_message(self.CompletionAction("down"))
         else:
-            self.action_cursor_down()
+            self.post_message(self.NavigationAction("down"))
 
     def action_completion_dismiss(self) -> None:
         if self.completion_active:
@@ -140,7 +145,7 @@ class CodingAgentTui(App[None]):
     TITLE = "codingAgent"
     SUB_TITLE = "local coding agent"
     BINDINGS: ClassVar[list[BindingType]] = [
-        Binding("ctrl+c", "cancel_turn", "Cancel / copy", show=True, priority=True),
+        Binding("ctrl+c,super+c", "cancel_turn", "Cancel / copy", show=True, priority=True),
         Binding("ctrl+q", "quit_agent", "Quit", show=True),
         Binding("ctrl+t", "toggle_thinking", "Thinking", show=True),
     ]
@@ -174,6 +179,8 @@ class CodingAgentTui(App[None]):
         self._completion_mode: Literal["commands", "models"] | None = None
         self._completion_matches: list[str] = []
         self._dismissed_completion_value: str | None = None
+        self._prompt_history: list[str] = []
+        self._history_index: int | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("codingAgent", id="brand")
@@ -212,6 +219,8 @@ class CodingAgentTui(App[None]):
             await self._notice("A turn is already running. Press Ctrl+C to cancel it.", "warning")
             return
         await self._mount(Static(prompt, markup=False, classes="message user-message"))
+        self._prompt_history.append(prompt)
+        self._history_index = None
         event.text_area.disabled = True
         self._reset_turn_widgets()
         self._turn_worker = self.run_worker(self._run_turn(prompt), group="agent", exclusive=True)
@@ -233,6 +242,33 @@ class CodingAgentTui(App[None]):
             self._hide_completion()
         elif event.action in {"complete", "select"}:
             await self._accept_completion(complete_only=event.action == "complete")
+
+    @on(PromptTextArea.NavigationAction)
+    def navigate_composer(self, event: PromptTextArea.NavigationAction) -> None:
+        composer = self.query_one("#composer", PromptTextArea)
+        if composer.text:
+            if event.direction == "up":
+                composer.move_cursor((0, 0))
+            else:
+                lines = composer.text.split("\n")
+                composer.move_cursor((len(lines) - 1, len(lines[-1])))
+            return
+        if not self._prompt_history:
+            return
+        if event.direction == "up":
+            self._history_index = (
+                len(self._prompt_history) - 1
+                if self._history_index is None
+                else max(0, self._history_index - 1)
+            )
+        elif self._history_index is None:
+            return
+        elif self._history_index < len(self._prompt_history) - 1:
+            self._history_index += 1
+        else:
+            self._history_index = None
+            return
+        composer.value = self._prompt_history[self._history_index]
 
     @on(OptionList.OptionSelected, "#completion-options")
     async def select_completion(self, event: OptionList.OptionSelected) -> None:
