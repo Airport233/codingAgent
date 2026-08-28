@@ -81,7 +81,8 @@ async def run_repl(
             else:
                 write_output(
                     f"Context: {status.used_tokens}/{status.context_window} tokens "
-                    f"estimated ({status.level}); auto={status.soft_limit}, "
+                    f"estimated ({status.used_tokens / status.context_window:.1%}, "
+                    f"{status.level}); auto={status.soft_limit}, "
                     f"hard={status.hard_limit}"
                 )
                 if status.last_provider_input_tokens is not None:

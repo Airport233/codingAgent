@@ -91,6 +91,8 @@ class RecoveredSession:
     conversation: tuple[ConversationExchange, ...]
     warnings: tuple[str, ...]
     compaction: dict[str, object] | None = None
+    model: str | None = None
+    conversation_models: tuple[str | None, ...] = ()
 
 
 class JsonlSessionStore:
@@ -167,7 +169,9 @@ class JsonlSessionRepository:
             sequence=events[-1].sequence,
             redactor=self._redactor,
         )
-        conversation, unfinished, compaction = _replay(events)
+        conversation, conversation_models, unfinished, pending_model, compaction, model = _replay(
+            events
+        )
         if unfinished is not None:
             repair = ToolContinuationExchange(
                 assistant=unfinished,
@@ -183,7 +187,15 @@ class JsonlSessionRepository:
             )
             await store.append("tool_continuation", repair)
             conversation.append(repair)
-        return RecoveredSession(store, tuple(conversation), tuple(warnings), compaction)
+            conversation_models.append(pending_model)
+        return RecoveredSession(
+            store,
+            tuple(conversation),
+            tuple(warnings),
+            compaction,
+            model,
+            tuple(conversation_models),
+        )
 
 
 def _project_key(project_root: Path) -> str:
@@ -270,32 +282,49 @@ def _validate_event_sequence(events: Sequence[SessionEvent]) -> None:
 
 def _replay(
     events: Sequence[SessionEvent],
-) -> tuple[list[ConversationExchange], AssistantExchange | None, dict[str, object] | None]:
+) -> tuple[
+    list[ConversationExchange],
+    list[str | None],
+    AssistantExchange | None,
+    str | None,
+    dict[str, object] | None,
+    str | None,
+]:
     conversation: list[ConversationExchange] = []
+    conversation_models: list[str | None] = []
     pending: AssistantExchange | None = None
+    pending_model: str | None = None
     compaction: dict[str, object] | None = None
+    model: str | None = None
     for event in events:
         if event.kind == "user_exchange":
             if pending is not None:
                 raise SessionCorruptError("User exchange appeared before pending tool results")
             conversation.append(_decode_user_exchange(event.payload))
+            conversation_models.append(model)
         elif event.kind == "assistant_exchange":
             if pending is not None:
                 raise SessionCorruptError("Assistant exchange appeared before pending tool results")
             assistant = _decode_assistant_exchange(event.payload)
             if assistant.tool_uses:
                 pending = assistant
+                pending_model = model
             else:
                 conversation.append(assistant)
+                conversation_models.append(model)
         elif event.kind == "tool_continuation":
             continuation = _decode_tool_continuation(event.payload)
             if pending is None or continuation.assistant != pending:
                 raise SessionCorruptError("Tool continuation does not match its assistant exchange")
             conversation.append(continuation)
+            conversation_models.append(pending_model)
             pending = None
+            pending_model = None
         elif event.kind == "compaction_completed":
             compaction = _require_dict(event.payload, "compaction checkpoint")
-    return conversation, pending, compaction
+        elif event.kind == "model_changed":
+            model = _require_string(_require_mapping(event.payload, "model change"), "current")
+    return conversation, conversation_models, pending, pending_model, compaction, model
 
 
 def _encode_payload(payload: object) -> object:

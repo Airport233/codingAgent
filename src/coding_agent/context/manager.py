@@ -8,6 +8,8 @@ from typing import Literal
 from coding_agent.domain import (
     AssistantExchange,
     ConversationExchange,
+    RedactedThinkingBlock,
+    ThinkingBlock,
     ToolContinuationExchange,
     UserExchange,
 )
@@ -108,12 +110,14 @@ class ContextManager:
         estimator: TokenEstimator,
         *,
         retained_exchanges: int = 6,
+        excluded_thinking_indices: frozenset[int] = frozenset(),
     ) -> None:
         if retained_exchanges < 1:
             raise ValueError("retained_exchanges must be positive")
         self._budget = budget
         self._estimator = estimator
         self._retained_exchanges = retained_exchanges
+        self._excluded_thinking_indices = excluded_thinking_indices
         self._checkpoint: CompactionCheckpoint | None = None
         self._last_provider_input_tokens: int | None = None
 
@@ -142,10 +146,27 @@ class ContextManager:
 
     def project(self, history: Sequence[ConversationExchange]) -> tuple[ConversationExchange, ...]:
         if self._checkpoint is None:
-            return tuple(history)
-        return (
-            UserExchange(self._checkpoint.summary),
-            *tuple(history[self._checkpoint.retained_from :]),
+            projected = tuple(enumerate(history))
+        else:
+            projected = (
+                (None, UserExchange(self._checkpoint.summary)),
+                *tuple(
+                    enumerate(
+                        history[self._checkpoint.retained_from :], self._checkpoint.retained_from
+                    )
+                ),
+            )
+        return tuple(
+            filtered_exchange
+            for index, exchange in projected
+            if (
+                filtered_exchange := (
+                    _without_thinking(exchange)
+                    if index in self._excluded_thinking_indices
+                    else exchange
+                )
+            )
+            is not None
         )
 
     def prepare(
@@ -199,7 +220,21 @@ class ContextManager:
         strategy = "deterministic"
         if summarize is not None:
             try:
-                generated = await summarize(tuple(history[:retained_from]))
+                summary_input = tuple(history[:retained_from])
+                if self._excluded_thinking_indices:
+                    summary_input = tuple(
+                        filtered_exchange
+                        for index, exchange in enumerate(summary_input)
+                        if (
+                            filtered_exchange := (
+                                _without_thinking(exchange)
+                                if index in self._excluded_thinking_indices
+                                else exchange
+                            )
+                        )
+                        is not None
+                    )
+                generated = await summarize(summary_input)
                 if not _valid_structured_summary(generated):
                     raise ValueError("Provider returned an invalid context summary")
                 candidate = self.prepare(history, reason=reason, summary=generated)
@@ -310,3 +345,25 @@ def _exchange_text(exchange: ConversationExchange) -> str:
         )
         return f"Assistant tools: {results}"
     raise TypeError(f"Unsupported exchange: {type(exchange).__name__}")
+
+
+def _without_thinking(exchange: ConversationExchange) -> ConversationExchange | None:
+    if isinstance(exchange, UserExchange):
+        return exchange
+    if isinstance(exchange, ToolContinuationExchange):
+        assistant = _assistant_without_thinking(exchange.assistant)
+        if assistant is None:
+            raise ValueError("Tool continuation lost its tool-use blocks during projection")
+        return ToolContinuationExchange(assistant, exchange.results)
+    return _assistant_without_thinking(exchange)
+
+
+def _assistant_without_thinking(exchange: AssistantExchange) -> AssistantExchange | None:
+    blocks = tuple(
+        block
+        for block in exchange.blocks
+        if not isinstance(block, (ThinkingBlock, RedactedThinkingBlock))
+    )
+    if not blocks:
+        return None
+    return AssistantExchange(blocks, exchange.stop_reason, exchange.usage)

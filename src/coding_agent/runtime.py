@@ -168,6 +168,22 @@ async def create_runtime(
         store = recovered.store
         initial_exchanges = recovered.conversation
 
+    previous_model = recovered.model if recovered is not None else None
+    excluded_thinking_indices = (
+        frozenset(
+            index
+            for index, exchange_model in enumerate(recovered.conversation_models)
+            if exchange_model is not None and exchange_model != settings.model
+        )
+        if recovered is not None
+        else frozenset()
+    )
+    if previous_model != settings.model:
+        await store.append(
+            "model_changed",
+            {"previous": previous_model, "current": settings.model},
+        )
+
     client: AsyncAnthropic | None = None
     selected_provider = provider
     if selected_provider is None:
@@ -192,6 +208,7 @@ async def create_runtime(
             auto_ratio=settings.auto_compact_ratio,
         ),
         TokenEstimator(),
+        excluded_thinking_indices=excluded_thinking_indices,
     )
     if recovered is not None and recovered.compaction is not None:
         context_manager.restore(initial_exchanges, recovered.compaction)
