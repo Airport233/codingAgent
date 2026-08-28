@@ -181,6 +181,7 @@ class CodingAgentTui(App[None]):
         self._dismissed_completion_value: str | None = None
         self._prompt_history: list[str] = []
         self._history_index: int | None = None
+        self._last_history_text: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("codingAgent", id="brand")
@@ -221,6 +222,7 @@ class CodingAgentTui(App[None]):
         await self._mount(Static(prompt, markup=False, classes="message user-message"))
         self._prompt_history.append(prompt)
         self._history_index = None
+        self._last_history_text = None
         event.text_area.disabled = True
         self._reset_turn_widgets()
         self._turn_worker = self.run_worker(self._run_turn(prompt), group="agent", exclusive=True)
@@ -246,7 +248,12 @@ class CodingAgentTui(App[None]):
     @on(PromptTextArea.NavigationAction)
     def navigate_composer(self, event: PromptTextArea.NavigationAction) -> None:
         composer = self.query_one("#composer", PromptTextArea)
-        if composer.text:
+        history_active = (
+            self._history_index is not None and composer.text == self._last_history_text
+        )
+        if composer.text and not history_active:
+            self._history_index = None
+            self._last_history_text = None
             if event.direction == "up":
                 composer.move_cursor((0, 0))
             else:
@@ -256,19 +263,28 @@ class CodingAgentTui(App[None]):
         if not self._prompt_history:
             return
         if event.direction == "up":
-            self._history_index = (
-                len(self._prompt_history) - 1
-                if self._history_index is None
-                else max(0, self._history_index - 1)
-            )
-        elif self._history_index is None:
-            return
-        elif self._history_index < len(self._prompt_history) - 1:
-            self._history_index += 1
-        else:
+            if history_active:
+                assert self._history_index is not None
+                self._history_index = max(0, self._history_index - 1)
+            else:
+                self._history_index = len(self._prompt_history) - 1
+        elif not history_active:
             self._history_index = None
+            self._last_history_text = None
             return
-        composer.value = self._prompt_history[self._history_index]
+        else:
+            assert self._history_index is not None
+            if self._history_index < len(self._prompt_history) - 1:
+                self._history_index += 1
+            else:
+                self._history_index = None
+                self._last_history_text = None
+                composer.clear()
+                return
+        assert self._history_index is not None
+        history_text = self._prompt_history[self._history_index]
+        self._last_history_text = history_text
+        composer.value = history_text
 
     @on(OptionList.OptionSelected, "#completion-options")
     async def select_completion(self, event: OptionList.OptionSelected) -> None:

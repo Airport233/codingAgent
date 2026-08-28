@@ -143,15 +143,33 @@ async def test_empty_composer_navigates_prompt_history_and_text_arrows_move_to_e
         await pilot.pause()
         assert composer.value == "Second prompt"
 
-        composer.clear()
         await pilot.press("up")
         await pilot.pause()
         assert composer.value == "First prompt"
 
-        composer.clear()
         await pilot.press("down")
         await pilot.pause()
         assert composer.value == "Second prompt"
+
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.value == ""
+
+        await pilot.press("up")
+        await pilot.pause()
+        assert composer.value == "Second prompt"
+
+        await pilot.press(*" edited")
+        await pilot.pause()
+        assert composer.value == "Second prompt edited"
+
+        await pilot.press("up")
+        await pilot.pause()
+        assert composer.cursor_location == (0, 0)
+        assert composer.value == "Second prompt edited"
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.cursor_location == (0, len("Second prompt edited"))
 
         composer.value = "First line\nSecond line"
         await pilot.press("up")

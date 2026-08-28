@@ -409,6 +409,11 @@ feature/cli-hardening
 - Codex `94311d447587411789533c47601fd8bc9d81eb48`：[`command_popup.rs`](https://github.com/openai/codex/blob/94311d447587411789533c47601fd8bc9d81eb48/codex-rs/tui/src/bottom_pane/command_popup.rs) 与 [`slash_input.rs`](https://github.com/openai/codex/blob/94311d447587411789533c47601fd8bc9d81eb48/codex-rs/tui/src/bottom_pane/chat_composer/slash_input.rs)，Apache-2.0；
 - OpenCode `755ebdb94ee755a9d5691e47af2c16f56696996e`：[`slash-popover.tsx`](https://github.com/anomalyco/opencode/blob/755ebdb94ee755a9d5691e47af2c16f56696996e/packages/app/src/components/prompt-input/slash-popover.tsx) 与 [`use-composer-commands.tsx`](https://github.com/anomalyco/opencode/blob/755ebdb94ee755a9d5691e47af2c16f56696996e/packages/app/src/pages/session/use-composer-commands.tsx)，MIT。
 
+本项目的输入历史浏览交互参考以下固定版本，仅借鉴“未修改的召回内容可继续浏览”的状态语义，未复制实现代码：
+
+- Codex `94311d447587411789533c47601fd8bc9d81eb48`：[`chat_composer_history.rs`](https://github.com/openai/codex/blob/94311d447587411789533c47601fd8bc9d81eb48/codex-rs/tui/src/bottom_pane/chat_composer_history.rs)，Apache-2.0；
+- OpenCode `755ebdb94ee755a9d5691e47af2c16f56696996e`：[`history.ts`](https://github.com/anomalyco/opencode/blob/755ebdb94ee755a9d5691e47af2c16f56696996e/packages/app/src/components/prompt-input/history.ts)，MIT。
+
 ## 15. 技术完成标准
 
 技术基线完成需要同时满足：
