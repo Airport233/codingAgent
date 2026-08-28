@@ -538,7 +538,11 @@ async def test_manual_compaction_refreshes_context_and_reports_projection_detail
         composer = app.query_one("#composer", PromptTextArea)
         composer.value = "/compact"
         await pilot.press("enter")
-        await pilot.pause()
+        for _ in range(20):
+            await pilot.pause(0.05)
+            notices = list(app.query(".notice"))
+            if notices and "provider summary" in str(notices[-1].render()):
+                break
 
         status = application.context_status()
         assert status is not None
@@ -551,7 +555,11 @@ async def test_manual_compaction_refreshes_context_and_reports_projection_detail
 
         composer.value = "/context"
         await pilot.press("enter")
-        await pilot.pause()
+        for _ in range(20):
+            await pilot.pause(0.05)
+            notices = list(app.query(".notice"))
+            if notices and "Last compaction:" in str(notices[-1].render()):
+                break
         context_notice = str(list(app.query(".notice"))[-1].render())
         assert "Context estimate:" in context_notice
         assert "last Provider input=2400 tokens exact" in context_notice
