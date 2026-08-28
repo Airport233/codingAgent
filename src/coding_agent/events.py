@@ -36,6 +36,14 @@ class ContextUsageChanged:
 
 
 @dataclass(frozen=True, slots=True)
+class ApprovalRequested:
+    request_id: str
+    call_id: str
+    tool_name: str
+    arguments: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
 class ToolStarted:
     call_id: str
     tool_name: str
@@ -81,6 +89,7 @@ class AgentCancelled:
 
 type CoreEvent = (
     AgentStarted
+    | ApprovalRequested
     | TextDelta
     | ThinkingStarted
     | ThinkingDelta

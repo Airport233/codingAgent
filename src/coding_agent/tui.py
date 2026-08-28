@@ -7,7 +7,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import ClassVar, Literal
+from typing import ClassVar, Literal, cast
 
 from textual import on
 from textual.app import App, ComposeResult
@@ -21,6 +21,7 @@ from textual.widgets.option_list import Option
 from textual.worker import Worker
 
 from coding_agent.application import AgentApplication
+from coding_agent.approval import ApprovalDecision
 from coding_agent.domain import (
     AssistantExchange,
     CompactionRecord,
@@ -39,6 +40,7 @@ from coding_agent.events import (
     AgentCompleted,
     AgentFailed,
     AgentStarted,
+    ApprovalRequested,
     ContextUsageChanged,
     TextDelta,
     ThinkingDelta,
@@ -282,6 +284,52 @@ class ResumeSessionScreen(Screen[str | None]):
             f"Model: {model}\n"
             f"Exchanges: {session.exchange_count} · Compacted: {compacted}"
         )
+
+
+class ApprovalScreen(Screen[tuple[str, ApprovalDecision]]):
+    """Blocking choice for a tool invocation that requires user approval."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("escape,ctrl+c", "deny", "Deny", show=True),
+    ]
+
+    def __init__(self, event: ApprovalRequested) -> None:
+        super().__init__()
+        self.request = event
+
+    def compose(self) -> ComposeResult:
+        yield Static("Permission required", id="approval-title")
+        title = _tool_title(
+            ToolStarted(self.request.call_id, self.request.tool_name, self.request.arguments)
+        )
+        yield Static(
+            f"{title}\n\n{_tool_arguments(self.request.arguments)}",
+            markup=False,
+            id="approval-details",
+        )
+        yield OptionList(
+            Option("Allow once", id="allow_once"),
+            Option("Always allow this tool for this session", id="allow_session"),
+            Option("Deny", id="deny"),
+            id="approval-options",
+            markup=False,
+        )
+        yield Static("↑/↓ select · Enter confirm · Esc deny", id="approval-help")
+
+    def on_mount(self) -> None:
+        choices = self.query_one("#approval-options", OptionList)
+        choices.highlighted = 0
+        choices.focus()
+
+    @on(OptionList.OptionSelected, "#approval-options")
+    def select_decision(self, event: OptionList.OptionSelected) -> None:
+        if event.option_id in {"allow_once", "allow_session", "deny"}:
+            self.dismiss(
+                (self.request.request_id, cast(ApprovalDecision, event.option_id))
+            )
+
+    def action_deny(self) -> None:
+        self.dismiss((self.request.request_id, "deny"))
 
 
 class CodingAgentTui(App[None]):
@@ -542,6 +590,8 @@ class CodingAgentTui(App[None]):
             async for event in self.application.run(prompt):
                 if isinstance(event, AgentStarted):
                     self._refresh_session_metadata()
+                elif isinstance(event, ApprovalRequested):
+                    self.push_screen(ApprovalScreen(event), self._approval_selected)
                 elif isinstance(event, TextDelta):
                     if self._assistant is None:
                         self._assistant = Static(
@@ -732,6 +782,16 @@ class CodingAgentTui(App[None]):
             return
         self.run_worker(
             self._resume_session(session_id), group="session-transition", exclusive=True
+        )
+
+    def _approval_selected(self, result: tuple[str, ApprovalDecision] | None) -> None:
+        if result is None:
+            return
+        request_id, decision = result
+        self.run_worker(
+            self.application.resolve_approval(request_id, decision),
+            group="approval-resolution",
+            exclusive=True,
         )
 
     async def _resume_session(self, session_id: str) -> None:

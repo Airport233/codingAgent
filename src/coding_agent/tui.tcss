@@ -170,3 +170,38 @@ ResumeSessionScreen {
     padding: 0 1;
     color: #64748b;
 }
+
+ApprovalScreen {
+    background: #0b0f14;
+    color: #d7dde5;
+    layout: vertical;
+    padding: 2 4;
+}
+
+#approval-title {
+    height: 3;
+    padding: 1 2;
+    color: #fbbf24;
+    text-style: bold;
+    border-bottom: solid #854d0e;
+}
+
+#approval-details {
+    height: 1fr;
+    padding: 1 2;
+    background: #111821;
+    border: round #334155;
+}
+
+#approval-options {
+    height: 7;
+    margin-top: 1;
+    background: #111821;
+    border: round #fbbf24;
+}
+
+#approval-help {
+    height: 2;
+    padding: 0 1;
+    color: #94a3b8;
+}

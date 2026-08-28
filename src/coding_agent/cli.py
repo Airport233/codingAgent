@@ -14,6 +14,7 @@ from coding_agent.events import (
     AgentCancelled,
     AgentCompleted,
     AgentFailed,
+    ApprovalRequested,
     ContextUsageChanged,
     TextDelta,
     ThinkingDelta,
@@ -55,6 +56,9 @@ def root(
         float | None,
         typer.Option(min=0.01, max=0.99, help="Automatic compaction threshold ratio."),
     ] = None,
+    approval_mode: Annotated[
+        str | None, typer.Option(help="Shell approval mode: auto, ask, or deny.")
+    ] = None,
     prompt: Annotated[str | None, typer.Option(help="Run one prompt and exit.")] = None,
 ) -> None:
     """Run codingAgent from the terminal."""
@@ -67,6 +71,7 @@ def root(
             max_tokens=max_tokens,
             context_window=context_window,
             auto_compact_ratio=auto_compact_ratio,
+            approval_mode=approval_mode,
         )
         asyncio.run(_run_cli(settings, resume=resume, prompt=prompt))
     except RuntimeConfigurationError as error:
@@ -210,6 +215,21 @@ async def run_repl(
                         f"[context] {event.used_tokens}/{event.context_window} "
                         f"tokens ({event.level})\n"
                     )
+            elif isinstance(event, ApprovalRequested):
+                operation = event.arguments.get("command", event.arguments)
+                write_output(
+                    f"[approval] {event.tool_name}: {operation}\n"
+                    "Allow? [y] once / [a] session / [n] deny: "
+                )
+                answer = (await read_input()).strip().casefold()
+                decision = (
+                    "allow_session"
+                    if answer in {"a", "always"}
+                    else "allow_once"
+                    if answer in {"y", "yes"}
+                    else "deny"
+                )
+                await application.resolve_approval(event.request_id, decision)
             elif isinstance(event, ToolStarted):
                 write_output(f"\n[tool] {_format_tool_call(event)}\n")
             elif isinstance(event, ToolFinished):
@@ -285,6 +305,7 @@ async def _run_cli(
             max_steps=current_settings.max_steps_override,
             context_window=current_settings.context_window_override,
             auto_compact_ratio=current_settings.auto_compact_ratio_override,
+            approval_mode=current_settings.approval_mode_override,
         )
         next_runtime = await create_runtime(
             next_settings,
@@ -347,7 +368,7 @@ async def _run_cli(
             session_id=runtime.session_id,
             available_models=current_settings.available_models,
             version=_package_version(),
-            permissions="automatic",
+            permissions=current_settings.approval_mode,
             switch_model=switch_model,
             clear_session=clear_session,
             list_sessions=list_sessions,

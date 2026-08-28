@@ -1,5 +1,6 @@
 [general]
 default_model = "example/example-model"
+approval_mode = "ask"
 
 [providers.example]
 protocol = "anthropic-messages"

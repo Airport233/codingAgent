@@ -10,6 +10,7 @@ from textual.widgets import Collapsible, OptionList
 
 import coding_agent.tui as tui_module
 from coding_agent.application import AgentApplication
+from coding_agent.approval import ConfigurableApprovalPolicy
 from coding_agent.context import ContextBudget, ContextManager, TokenEstimator
 from coding_agent.domain import (
     AssistantExchange,
@@ -30,6 +31,7 @@ from coding_agent.tools.base import ToolOutput, ToolSpec
 from coding_agent.tools.catalog import ToolCatalog
 from coding_agent.tools.dispatcher import ToolDispatcher
 from coding_agent.tui import (
+    ApprovalScreen,
     CliTransition,
     CodingAgentTui,
     CompactionProgress,
@@ -420,6 +422,59 @@ async def test_resume_is_explicitly_blocked_while_a_turn_is_running() -> None:
             list(app.query(".notice"))[-1].render()
         )
         await app.action_cancel_turn()
+
+
+async def test_tui_approval_screen_shows_command_and_allows_once() -> None:
+    class ShellInput(BaseModel):
+        command: str
+
+    class Shell:
+        name = "shell"
+        description = "Run a command"
+        input_model = ShellInput
+
+        def __init__(self) -> None:
+            self.executed = False
+
+        async def execute(self, arguments: BaseModel) -> ToolOutput:
+            self.executed = True
+            return ToolOutput("exit_code: 0")
+
+    shell = Shell()
+    application = AgentApplication(
+        FakeProvider(
+            [
+                AssistantExchange(
+                    (ToolUseBlock("call-1", "shell", {"command": "uv run pytest"}),),
+                    "tool_use",
+                ),
+                AssistantExchange((TextBlock("done"),), "end_turn"),
+            ]
+        ),
+        ToolDispatcher(ToolCatalog({"shell": shell})),
+        InMemorySessionStore(),
+        approval_policy=ConfigurableApprovalPolicy("ask", frozenset({"shell"})),
+    )
+    app = CodingAgentTui(
+        application,
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        app.query_one("#composer", PromptTextArea).value = "Run tests"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert isinstance(app.screen, ApprovalScreen)
+        assert "uv run pytest" in str(app.screen.query_one("#approval-details").render())
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert shell.executed is True
+        assert "done" in str(app.query_one(".assistant-message").render())
 
 
 async def test_slash_popup_handles_plain_completion_and_no_matches() -> None:

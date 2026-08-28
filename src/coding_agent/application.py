@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
 
+from coding_agent.approval import (
+    ApprovalDecision,
+    ApprovalPolicy,
+    ConfigurableApprovalPolicy,
+)
 from coding_agent.context import CompactionCheckpoint, ContextManager, ContextStatus
 from coding_agent.domain import (
     AssistantExchange,
@@ -21,6 +27,7 @@ from coding_agent.events import (
     AgentCompleted,
     AgentFailed,
     AgentStarted,
+    ApprovalRequested,
     ContextUsageChanged,
     CoreEvent,
     TextDelta,
@@ -55,6 +62,7 @@ class AgentApplication:
         context_reprojected: bool = False,
         display_redactor: Callable[[object], object] | None = None,
         initial_compactions: Sequence[CompactionRecord] = (),
+        approval_policy: ApprovalPolicy | None = None,
     ) -> None:
         self._provider = provider
         self._dispatcher = dispatcher
@@ -67,6 +75,8 @@ class AgentApplication:
         self._context_reprojected = context_reprojected
         self._display_redactor = display_redactor or (lambda value: value)
         self._compaction_history = tuple(initial_compactions)
+        self._approval_policy = approval_policy or ConfigurableApprovalPolicy()
+        self._pending_approvals: dict[str, asyncio.Future[ApprovalDecision]] = {}
         self._closed = False
 
     async def close_session(self) -> None:
@@ -94,6 +104,16 @@ class AgentApplication:
     def compaction_history(self) -> tuple[CompactionRecord, ...]:
         """Return durable compaction events with their original transcript positions."""
         return self._compaction_history
+
+    async def resolve_approval(self, request_id: str, decision: ApprovalDecision) -> bool:
+        pending = self._pending_approvals.get(request_id)
+        if pending is None or pending.done():
+            return False
+        await self._sessions.append(
+            "approval_resolved", {"request_id": request_id, "decision": decision}
+        )
+        pending.set_result(decision)
+        return True
 
     async def compact_context(self, reason: str = "manual") -> CompactionCheckpoint | None:
         if self._context_manager is None:
@@ -262,6 +282,95 @@ class AgentApplication:
             if response.tool_uses:
                 results: list[ToolResultBlock] = []
                 for call_index, call in enumerate(response.tool_uses):
+                    approval = self._approval_policy.evaluate(call)
+                    if approval == "ask":
+                        request_id = uuid.uuid4().hex
+                        pending: asyncio.Future[ApprovalDecision] = (
+                            asyncio.get_running_loop().create_future()
+                        )
+                        self._pending_approvals[request_id] = pending
+                        await self._sessions.append(
+                            "approval_requested",
+                            {
+                                "request_id": request_id,
+                                "call_id": call.call_id,
+                                "tool_name": call.name,
+                                "input": call.input,
+                            },
+                        )
+                        yield ApprovalRequested(
+                            request_id=request_id,
+                            call_id=call.call_id,
+                            tool_name=call.name,
+                            arguments=self._redacted_mapping(call.input),
+                        )
+                        try:
+                            decision = await pending
+                        except asyncio.CancelledError:
+                            await self._sessions.append(
+                                "approval_resolved",
+                                {"request_id": request_id, "decision": "cancelled"},
+                            )
+                            results.append(
+                                ToolResultBlock(
+                                    call.call_id,
+                                    "cancelled_during_approval",
+                                    True,
+                                    {"cancelled": True},
+                                )
+                            )
+                            for remaining in response.tool_uses[call_index + 1 :]:
+                                results.append(
+                                    ToolResultBlock(
+                                        remaining.call_id,
+                                        "cancelled_before_execution",
+                                        True,
+                                        {"cancelled": True},
+                                    )
+                                )
+                            continuation = ToolContinuationExchange(response, tuple(results))
+                            self._conversation.exchanges.append(continuation)
+                            await self._sessions.append("tool_continuation", continuation)
+                            await self._sessions.append(
+                                "turn_cancelled", {"phase": "approval"}
+                            )
+                            yield AgentCancelled(message="Approval cancelled")
+                            return
+                        finally:
+                            self._pending_approvals.pop(request_id, None)
+                        self._approval_policy.remember(call, decision)
+                        approval = "deny" if decision == "deny" else "allow"
+                    if approval == "deny":
+                        result = ToolResultBlock(
+                            call.call_id,
+                            "Permission denied; the tool was not executed",
+                            True,
+                            {"denied": True},
+                        )
+                        results.append(result)
+                        yield ToolStarted(
+                            call_id=call.call_id,
+                            tool_name=call.name,
+                            arguments=self._redacted_mapping(call.input),
+                        )
+                        await self._sessions.append(
+                            "tool_finished",
+                            {
+                                "call_id": call.call_id,
+                                "tool_name": call.name,
+                                "is_error": True,
+                                "model_content": result.content,
+                                "metadata": result.metadata,
+                            },
+                        )
+                        yield ToolFinished(
+                            call_id=call.call_id,
+                            tool_name=call.name,
+                            is_error=True,
+                            content=result.content,
+                            metadata=result.metadata,
+                        )
+                        continue
                     await self._sessions.append(
                         "tool_started",
                         {

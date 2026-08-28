@@ -5,12 +5,13 @@ import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from anthropic import AsyncAnthropic
 from platformdirs import user_config_path, user_data_path
 
 from coding_agent.application import AgentApplication
+from coding_agent.approval import ApprovalMode, ConfigurableApprovalPolicy
 from coding_agent.context import ContextBudget, ContextManager, TokenEstimator
 from coding_agent.memory.loader import ProjectMemoryLoader
 from coding_agent.providers.anthropic import AnthropicMessagesProvider
@@ -20,6 +21,7 @@ from coding_agent.sessions.jsonl import JsonlSessionRepository, Redactor
 from coding_agent.tools.builtin import BuiltinToolSource
 from coding_agent.tools.catalog import ToolCatalog
 from coding_agent.tools.dispatcher import ToolDispatcher
+from coding_agent.tools.shell import ShellConfig
 
 
 class RuntimeConfigurationError(ValueError):
@@ -42,10 +44,12 @@ class RuntimeSettings:
     provider_extra_body: dict[str, object] = field(default_factory=dict, repr=False)
     supports_tools: bool = True
     auth_mode: str = "x-api-key"
+    approval_mode: ApprovalMode = "auto"
     max_tokens_override: int | None = field(default=None, repr=False)
     max_steps_override: int | None = field(default=None, repr=False)
     context_window_override: int | None = field(default=None, repr=False)
     auto_compact_ratio_override: float | None = field(default=None, repr=False)
+    approval_mode_override: ApprovalMode | None = field(default=None, repr=False)
 
     @classmethod
     def from_environment(
@@ -59,6 +63,7 @@ class RuntimeSettings:
         max_steps: int | None = None,
         context_window: int | None = None,
         auto_compact_ratio: float | None = None,
+        approval_mode: str | None = None,
     ) -> RuntimeSettings:
         return cls.load(
             workspace=workspace,
@@ -70,6 +75,7 @@ class RuntimeSettings:
             max_steps=max_steps,
             context_window=context_window,
             auto_compact_ratio=auto_compact_ratio,
+            approval_mode=approval_mode,
         )
 
     @classmethod
@@ -85,6 +91,7 @@ class RuntimeSettings:
         max_steps: int | None = None,
         context_window: int | None = None,
         auto_compact_ratio: float | None = None,
+        approval_mode: str | None = None,
     ) -> RuntimeSettings:
         values = os.environ if environ is None else environ
         config = _read_config(config_path or user_config_path("codingAgent") / "config.toml")
@@ -116,6 +123,13 @@ class RuntimeSettings:
             0.8,
             "auto compaction ratio",
         )
+        approval_mode_value = (
+            approval_mode
+            or values.get("CODING_AGENT_APPROVAL_MODE")
+            or general.get("approval_mode", "auto")
+        )
+        if approval_mode_value not in {"auto", "ask", "deny"}:
+            raise RuntimeConfigurationError("Approval mode must be auto, ask, or deny")
         provider_extra_body = _thinking_options(model_config, resolved_max_tokens)
         supports_tools = _configured_bool(
             model_config.get("supports_tools"), True, "supports tools"
@@ -165,10 +179,14 @@ class RuntimeSettings:
             provider_extra_body=provider_extra_body,
             supports_tools=supports_tools,
             auth_mode=auth_mode,
+            approval_mode=cast(ApprovalMode, approval_mode_value),
             max_tokens_override=max_tokens,
             max_steps_override=max_steps,
             context_window_override=context_window,
             auto_compact_ratio_override=auto_compact_ratio,
+            approval_mode_override=(
+                cast(ApprovalMode, approval_mode) if approval_mode is not None else None
+            ),
         )
 
     @property
@@ -266,7 +284,9 @@ async def create_runtime(
             supports_tools=settings.supports_tools,
         )
 
-    catalog = await ToolCatalog.create((BuiltinToolSource(workspace_root),))
+    catalog = await ToolCatalog.create(
+        (BuiltinToolSource(workspace_root, shell_config=ShellConfig(mode=settings.approval_mode)),)
+    )
     context_manager = ContextManager(
         ContextBudget(
             context_window=settings.context_window,
@@ -289,6 +309,10 @@ async def create_runtime(
         context_reprojected=model_changed,
         display_redactor=redactor.redact,
         initial_compactions=recovered.compactions if recovered is not None else (),
+        approval_policy=ConfigurableApprovalPolicy(
+            mode=settings.approval_mode,
+            guarded_tools=frozenset({"shell"}),
+        ),
     )
     return AgentRuntime(application, store.session_id, client)
 
