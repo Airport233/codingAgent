@@ -11,7 +11,8 @@ from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, VerticalScroll
-from textual.widgets import Collapsible, Footer, Input, Label, Static
+from textual.message import Message
+from textual.widgets import Collapsible, Footer, Label, Static, TextArea
 from textual.worker import Worker
 
 from coding_agent.application import AgentApplication
@@ -40,6 +41,42 @@ class CliTransition:
 
 
 TransitionCallback = Callable[[str | None], Awaitable[CliTransition]]
+
+
+class PromptTextArea(TextArea):
+    """Soft-wrapping prompt editor with explicit submit and newline actions."""
+
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("enter", "submit", "Submit", show=False, priority=True),
+        Binding("shift+enter", "newline", "New line", show=False, priority=True),
+    ]
+
+    class Submitted(Message):
+        def __init__(self, text_area: PromptTextArea) -> None:
+            super().__init__()
+            self.text_area = text_area
+
+        @property
+        def control(self) -> PromptTextArea:
+            return self.text_area
+
+        @property
+        def value(self) -> str:
+            return self.text_area.text
+
+    @property
+    def value(self) -> str:
+        return self.text
+
+    @value.setter
+    def value(self, value: str) -> None:
+        self.load_text(value)
+
+    def action_submit(self) -> None:
+        self.post_message(self.Submitted(self))
+
+    def action_newline(self) -> None:
+        self.insert("\n")
 
 
 class CodingAgentTui(App[None]):
@@ -87,18 +124,24 @@ class CodingAgentTui(App[None]):
             yield Label(self.workspace, id="status-workspace")
             yield Label(self._context_label(), id="status-context")
             yield Label(f"session {self.session_id[:8]}", id="status-session")
-        yield Input(placeholder="Describe a coding task or type /help", id="composer")
+        yield PromptTextArea(
+            placeholder="Describe a task · Enter submit · Shift+Enter new line",
+            soft_wrap=True,
+            show_line_numbers=False,
+            highlight_cursor_line=False,
+            id="composer",
+        )
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#composer", Input).focus()
+        self.query_one("#composer", PromptTextArea).focus()
 
-    @on(Input.Submitted, "#composer")
-    async def submit_prompt(self, event: Input.Submitted) -> None:
+    @on(PromptTextArea.Submitted, "#composer")
+    async def submit_prompt(self, event: PromptTextArea.Submitted) -> None:
         prompt = event.value.strip()
         if not prompt:
             return
-        event.input.value = ""
+        event.text_area.clear()
         if prompt.startswith("/"):
             await self._command(prompt)
             return
@@ -106,9 +149,16 @@ class CodingAgentTui(App[None]):
             await self._notice("A turn is already running. Press Ctrl+C to cancel it.", "warning")
             return
         await self._mount(Static(prompt, markup=False, classes="message user-message"))
-        event.input.disabled = True
+        event.text_area.disabled = True
         self._reset_turn_widgets()
         self._turn_worker = self.run_worker(self._run_turn(prompt), group="agent", exclusive=True)
+
+    @on(TextArea.Changed, "#composer")
+    def resize_composer(self, event: TextArea.Changed) -> None:
+        self.call_after_refresh(self._resize_composer, event.text_area)
+
+    def _resize_composer(self, composer: TextArea) -> None:
+        composer.styles.height = max(3, min(composer.wrapped_document.height + 2, 8))
 
     async def _run_turn(self, prompt: str) -> None:
         try:
@@ -157,8 +207,8 @@ class CodingAgentTui(App[None]):
                     )
                     await self._mount(self._assistant)
         finally:
-            self.query_one("#composer", Input).disabled = False
-            self.query_one("#composer", Input).focus()
+            self.query_one("#composer", PromptTextArea).disabled = False
+            self.query_one("#composer", PromptTextArea).focus()
 
     async def _tool_started(self, event: ToolStarted) -> None:
         details = json.dumps(event.arguments, ensure_ascii=False, indent=2)
@@ -297,6 +347,8 @@ class CodingAgentTui(App[None]):
             self._turn_worker.cancel()
             return
         selected_text = self.screen.get_selected_text()
+        if isinstance(self.focused, TextArea) and self.focused.selected_text:
+            selected_text = self.focused.selected_text
         if selected_text:
             self.copy_to_clipboard(selected_text)
             await _copy_to_macos_clipboard(selected_text)

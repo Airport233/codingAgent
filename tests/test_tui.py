@@ -22,7 +22,7 @@ from coding_agent.sessions.memory import InMemorySessionStore
 from coding_agent.tools.base import ToolOutput, ToolSpec
 from coding_agent.tools.catalog import ToolCatalog
 from coding_agent.tools.dispatcher import ToolDispatcher
-from coding_agent.tui import CliTransition, CodingAgentTui
+from coding_agent.tui import CliTransition, CodingAgentTui, PromptTextArea
 
 pytestmark = pytest.mark.asyncio
 
@@ -71,6 +71,46 @@ async def test_tui_submits_prompt_and_streams_assistant_card() -> None:
         assert "Finished successfully." in str(app.query_one(".assistant-message").render())
         assert composer.value == ""
         assert composer.disabled is False
+
+
+async def test_composer_soft_wraps_long_input_instead_of_scrolling_horizontally() -> None:
+    app = CodingAgentTui(
+        application_with_response(),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test(size=(60, 24)) as pilot:
+        composer = app.query_one("#composer", PromptTextArea)
+        composer.value = "这是一段很长的用户输入" * 20
+        await pilot.pause()
+
+        assert composer.soft_wrap is True
+        assert composer.wrapped_document.height > 1
+        assert composer.scroll_x == 0
+        assert composer.size.height > 3
+
+
+async def test_shift_enter_adds_newline_and_enter_submits_multiline_prompt() -> None:
+    app = CodingAgentTui(
+        application_with_response(),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer", PromptTextArea)
+        composer.value = "First line"
+        await pilot.press("end", "shift+enter")
+        await pilot.press(*"Second line")
+        assert composer.value == "First line\nSecond line"
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert "First line\nSecond line" in str(app.query_one(".user-message").render())
 
 
 async def test_tui_renders_collapsible_thinking_and_completed_tool_card() -> None:

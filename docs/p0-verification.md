@@ -9,6 +9,7 @@ repository-wide quality command is the GitHub Actions `CI` workflow on macOS and
 | FR-CLI-004–005A | `test_tui_renders_collapsible_thinking_and_completed_tool_card`, `test_tui_slash_commands_update_state_without_leaving_full_screen` |
 | FR-CLI-006 | `test_runtime_settings_use_environment_without_exposing_private_values` |
 | FR-CLI-007 | `test_ctrl_c_cancels_active_provider_without_closing_tui`, `test_cancelling_a_running_tool_is_recorded_before_propagation` |
+| FR-CLI-008 | `test_composer_soft_wraps_long_input_instead_of_scrolling_horizontally`, `test_shift_enter_adds_newline_and_enter_submits_multiline_prompt` |
 | FR-CLI-009–010 | `test_ctrl_c_copies_selected_conversation_text_when_idle`, CLI `--prompt` integration tests |
 | FR-PROV-001–006 | `test_runtime_settings_load_user_provider_profile`, `test_repl_lists_and_switches_models_then_starts_a_new_session` |
 | FR-PROV-007, FR-PROV-010–012 | `tests/providers/`, `test_runtime_resume_with_new_model_excludes_old_thinking_from_requests` |

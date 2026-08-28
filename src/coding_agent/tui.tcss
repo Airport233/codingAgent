@@ -87,7 +87,9 @@ Screen {
 }
 
 #composer {
-    dock: bottom;
+    height: 3;
+    min-height: 3;
+    max-height: 8;
     margin: 0 1 1 1;
     border: tall #3b82f6;
     background: #111821;
