@@ -220,6 +220,7 @@ MVP 不实现 MCP 传输，也不开放 MCP 端口。工具目录使用 `ToolSou
 - thinking 和工具详情使用可折叠组件，运行状态与结果在同一组件内更新；
 - 会话文本支持鼠标拖选和复制；空闲时 `Ctrl+C` 复制选区，任务运行时仍优先取消；
 - 每段模型文本在事件时间线中独立挂载，保证文字、工具调用和工具结果严格按发生顺序显示；
+- `/` 命令与 `/model` 模型选择使用同一个单活动选择窗状态机；输入变化实时过滤，`↑/↓` 移动选择，`Tab` 补全，`Enter` 确认，`Esc` 仅关闭当前选择窗；
 - 核心事件由 TUI 异步 worker 消费，不阻塞输入与取消事件；
 - `--prompt` 保留 Rich/stdout 非交互适配器，不启动全屏界面。
 
@@ -401,6 +402,11 @@ feature/cli-hardening
 - 不复制与项目规模不相称的 Provider、插件、MCP、多 Agent 或沙箱体系；MCP 在 MVP 中仅保留工具来源扩展边界。
 - 引用具体实现时使用固定 commit 链接，并检查许可证。
 - Anthropic 协议字段以 Anthropic/百炼官方文档、SDK 源码和 Provider 探测结果为准。
+
+本项目的命令选择交互参考以下固定版本，仅借鉴状态与按键语义，未复制实现代码：
+
+- Codex `94311d447587411789533c47601fd8bc9d81eb48`：[`command_popup.rs`](https://github.com/openai/codex/blob/94311d447587411789533c47601fd8bc9d81eb48/codex-rs/tui/src/bottom_pane/command_popup.rs) 与 [`slash_input.rs`](https://github.com/openai/codex/blob/94311d447587411789533c47601fd8bc9d81eb48/codex-rs/tui/src/bottom_pane/chat_composer/slash_input.rs)，Apache-2.0；
+- OpenCode `755ebdb94ee755a9d5691e47af2c16f56696996e`：[`slash-popover.tsx`](https://github.com/anomalyco/opencode/blob/755ebdb94ee755a9d5691e47af2c16f56696996e/packages/app/src/components/prompt-input/slash-popover.tsx) 与 [`use-composer-commands.tsx`](https://github.com/anomalyco/opencode/blob/755ebdb94ee755a9d5691e47af2c16f56696996e/packages/app/src/pages/session/use-composer-commands.tsx)，MIT。
 
 ## 15. 技术完成标准
 

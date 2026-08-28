@@ -5,14 +5,15 @@ import json
 import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
-from textual.widgets import Collapsible, Footer, Label, Static, TextArea
+from textual.widgets import Collapsible, Footer, Label, OptionList, Static, TextArea
+from textual.widgets.option_list import Option
 from textual.worker import Worker
 
 from coding_agent.application import AgentApplication
@@ -43,13 +44,36 @@ class CliTransition:
 TransitionCallback = Callable[[str | None], Awaitable[CliTransition]]
 
 
+@dataclass(frozen=True, slots=True)
+class SlashCommand:
+    name: str
+    description: str
+
+
+SLASH_COMMANDS = (
+    SlashCommand("help", "Show available commands"),
+    SlashCommand("model", "Choose a model"),
+    SlashCommand("context", "Show context usage"),
+    SlashCommand("compact", "Compact conversation context"),
+    SlashCommand("thinking", "Toggle thinking details"),
+    SlashCommand("clear", "Start a new empty session"),
+    SlashCommand("exit", "Exit codingAgent"),
+)
+
+
 class PromptTextArea(TextArea):
     """Soft-wrapping prompt editor with explicit submit and newline actions."""
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("enter", "submit", "Submit", show=False, priority=True),
         Binding("shift+enter", "newline", "New line", show=False, priority=True),
+        Binding("up", "completion_up", "Previous", show=False, priority=True),
+        Binding("down", "completion_down", "Next", show=False, priority=True),
+        Binding("escape", "completion_dismiss", "Dismiss", show=False, priority=True),
+        Binding("tab", "completion_accept", "Complete", show=False, priority=True),
     ]
+
+    completion_active = False
 
     class Submitted(Message):
         def __init__(self, text_area: PromptTextArea) -> None:
@@ -64,6 +88,11 @@ class PromptTextArea(TextArea):
         def value(self) -> str:
             return self.text_area.text
 
+    class CompletionAction(Message):
+        def __init__(self, action: Literal["up", "down", "dismiss", "complete", "select"]):
+            super().__init__()
+            self.action = action
+
     @property
     def value(self) -> str:
         return self.text
@@ -71,12 +100,39 @@ class PromptTextArea(TextArea):
     @value.setter
     def value(self, value: str) -> None:
         self.load_text(value)
+        lines = value.split("\n")
+        self.move_cursor((len(lines) - 1, len(lines[-1])))
 
     def action_submit(self) -> None:
-        self.post_message(self.Submitted(self))
+        if self.completion_active:
+            self.post_message(self.CompletionAction("select"))
+        else:
+            self.post_message(self.Submitted(self))
 
     def action_newline(self) -> None:
         self.insert("\n")
+
+    def action_completion_up(self) -> None:
+        if self.completion_active:
+            self.post_message(self.CompletionAction("up"))
+        else:
+            self.action_cursor_up()
+
+    def action_completion_down(self) -> None:
+        if self.completion_active:
+            self.post_message(self.CompletionAction("down"))
+        else:
+            self.action_cursor_down()
+
+    def action_completion_dismiss(self) -> None:
+        if self.completion_active:
+            self.post_message(self.CompletionAction("dismiss"))
+
+    def action_completion_accept(self) -> None:
+        if self.completion_active:
+            self.post_message(self.CompletionAction("complete"))
+        else:
+            self.screen.focus_next()
 
 
 class CodingAgentTui(App[None]):
@@ -115,6 +171,9 @@ class CodingAgentTui(App[None]):
         self._thinking: tuple[Collapsible, Static] | None = None
         self._thinking_text = ""
         self._tools: dict[str, tuple[Collapsible, Static, str]] = {}
+        self._completion_mode: Literal["commands", "models"] | None = None
+        self._completion_matches: list[str] = []
+        self._dismissed_completion_value: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Static("codingAgent", id="brand")
@@ -124,6 +183,9 @@ class CodingAgentTui(App[None]):
             yield Label(self.workspace, id="status-workspace")
             yield Label(self._context_label(), id="status-context")
             yield Label(f"session {self.session_id[:8]}", id="status-session")
+        with Vertical(id="completion-popup"):
+            yield Label("Commands", id="completion-title")
+            yield OptionList(id="completion-options", markup=False)
         yield PromptTextArea(
             placeholder="Describe a task · Enter submit · Shift+Enter new line",
             soft_wrap=True,
@@ -134,6 +196,7 @@ class CodingAgentTui(App[None]):
         yield Footer()
 
     def on_mount(self) -> None:
+        self.query_one("#completion-popup", Vertical).display = False
         self.query_one("#composer", PromptTextArea).focus()
 
     @on(PromptTextArea.Submitted, "#composer")
@@ -156,9 +219,116 @@ class CodingAgentTui(App[None]):
     @on(TextArea.Changed, "#composer")
     def resize_composer(self, event: TextArea.Changed) -> None:
         self.call_after_refresh(self._resize_composer, event.text_area)
+        self._sync_completion(event.text_area.text)
+
+    @on(PromptTextArea.CompletionAction)
+    async def handle_completion_action(self, event: PromptTextArea.CompletionAction) -> None:
+        choices = self.query_one("#completion-options", OptionList)
+        if event.action == "up":
+            choices.action_cursor_up()
+        elif event.action == "down":
+            choices.action_cursor_down()
+        elif event.action == "dismiss":
+            self._dismissed_completion_value = self.query_one("#composer", PromptTextArea).text
+            self._hide_completion()
+        elif event.action in {"complete", "select"}:
+            await self._accept_completion(complete_only=event.action == "complete")
+
+    @on(OptionList.OptionSelected, "#completion-options")
+    async def select_completion(self, event: OptionList.OptionSelected) -> None:
+        if event.option_id is not None:
+            await self._accept_completion(option_id=event.option_id)
 
     def _resize_composer(self, composer: TextArea) -> None:
         composer.styles.height = max(3, min(composer.wrapped_document.height + 2, 8))
+
+    def _sync_completion(self, value: str) -> None:
+        if self._dismissed_completion_value == value:
+            self._hide_completion()
+            return
+        self._dismissed_completion_value = None
+        first_line = value.split("\n", 1)[0]
+        if not first_line.startswith("/"):
+            self._hide_completion()
+            return
+        if first_line.startswith("/model "):
+            query = first_line.removeprefix("/model ").casefold()
+            models = tuple(dict.fromkeys(self.available_models or (self.model,)))
+            matches = [model for model in models if query in model.casefold()]
+            self._show_completion("models", matches)
+            return
+        command_token = first_line[1:]
+        if any(character.isspace() for character in command_token):
+            self._hide_completion()
+            return
+        query = command_token.casefold()
+        matches = [
+            f"/{command.name}"
+            for command in SLASH_COMMANDS
+            if command.name.casefold().startswith(query)
+        ]
+        self._show_completion("commands", matches)
+
+    def _show_completion(self, mode: Literal["commands", "models"], matches: list[str]) -> None:
+        popup = self.query_one("#completion-popup", Vertical)
+        title = self.query_one("#completion-title", Label)
+        choices = self.query_one("#completion-options", OptionList)
+        self._completion_mode = mode
+        self._completion_matches = matches
+        title.update("Commands" if mode == "commands" else "Choose model")
+        choices.clear_options()
+        if mode == "commands":
+            descriptions = {f"/{item.name}": item.description for item in SLASH_COMMANDS}
+            choices.add_options(
+                Option(f"{item:<12} {descriptions[item]}", id=item) for item in matches
+            )
+        else:
+            choices.add_options(Option(item, id=item) for item in matches)
+        if not matches:
+            choices.add_option(Option("No matches", disabled=True))
+            choices.highlighted = None
+        else:
+            choices.highlighted = 0
+        popup.styles.height = min(max(len(matches), 1) + 2, 10)
+        popup.display = True
+        self.query_one("#composer", PromptTextArea).completion_active = True
+
+    def _hide_completion(self) -> None:
+        self._completion_mode = None
+        self._completion_matches = []
+        self.query_one("#completion-popup", Vertical).display = False
+        self.query_one("#composer", PromptTextArea).completion_active = False
+
+    async def _accept_completion(
+        self, *, complete_only: bool = False, option_id: str | None = None
+    ) -> None:
+        choices = self.query_one("#completion-options", OptionList)
+        selected = option_id
+        if selected is None and choices.highlighted is not None and self._completion_matches:
+            selected = self._completion_matches[choices.highlighted]
+        if selected is None:
+            return
+        composer = self.query_one("#composer", PromptTextArea)
+        if self._completion_mode == "commands":
+            if selected == "/model":
+                composer.value = "/model "
+                self._sync_completion(composer.value)
+            elif complete_only:
+                composer.value = selected
+                self._sync_completion(composer.value)
+            else:
+                composer.clear()
+                self._hide_completion()
+                await self._command(selected)
+        elif self._completion_mode == "models":
+            if complete_only:
+                composer.value = f"/model {selected}"
+                self._sync_completion(composer.value)
+            else:
+                composer.clear()
+                self._hide_completion()
+                await self._command(f"/model {selected}")
+        composer.focus()
 
     async def _run_turn(self, prompt: str) -> None:
         try:

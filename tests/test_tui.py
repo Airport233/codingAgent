@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 from pydantic import BaseModel
-from textual.widgets import Collapsible
+from textual.widgets import Collapsible, OptionList
 
 import coding_agent.tui as tui_module
 from coding_agent.application import AgentApplication
@@ -111,6 +111,83 @@ async def test_shift_enter_adds_newline_and_enter_submits_multiline_prompt() -> 
         await pilot.pause()
 
         assert "First line\nSecond line" in str(app.query_one(".user-message").render())
+
+
+async def test_slash_popup_filters_navigates_completes_and_dismisses() -> None:
+    app = CodingAgentTui(
+        application_with_response(),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+        available_models=("provider/model", "provider/other"),
+    )
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer", PromptTextArea)
+        popup = app.query_one("#completion-popup")
+        choices = app.query_one("#completion-options", OptionList)
+
+        composer.value = "/"
+        await pilot.pause()
+        assert popup.display is True
+        assert choices.option_count >= 7
+
+        composer.value = "/mo"
+        await pilot.pause()
+        assert choices.option_count == 1
+        assert choices.get_option_at_index(0).id == "/model"
+
+        await pilot.press("tab")
+        await pilot.pause()
+        assert composer.value == "/model "
+        assert choices.option_count == 2
+        assert choices.get_option_at_index(0).id == "provider/model"
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert popup.display is False
+
+        await pilot.press("backspace")
+        await pilot.pause()
+        assert popup.display is True
+
+
+async def test_model_command_opens_secondary_picker_and_switches_selection() -> None:
+    initial = application_with_response()
+    switched = application_with_response()
+    selected: list[str | None] = []
+
+    async def switch_model(target: str | None) -> CliTransition:
+        selected.append(target)
+        return CliTransition(switched, target or "", "session-2", ("model-a", "model-b"))
+
+    app = CodingAgentTui(
+        initial,
+        model="model-a",
+        workspace="/tmp/project",
+        session_id="session-1",
+        available_models=("model-a", "model-b"),
+        switch_model=switch_model,
+    )
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer", PromptTextArea)
+        choices = app.query_one("#completion-options", OptionList)
+        composer.value = "/model"
+        await pilot.pause()
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert composer.value == "/model "
+        assert choices.option_count == 2
+
+        await pilot.press("down", "enter")
+        await pilot.pause()
+
+        assert selected == ["model-b"]
+        assert app.model == "model-b"
+        assert composer.value == ""
+        assert app.query_one("#completion-popup").display is False
 
 
 async def test_tui_renders_collapsible_thinking_and_completed_tool_card() -> None:
