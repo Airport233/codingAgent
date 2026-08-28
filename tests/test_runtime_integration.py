@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from io import StringIO
 from pathlib import Path
 
 import pytest
+from rich.console import Console
 
-from coding_agent.cli import run_repl
+from coding_agent.cli import run_repl, write_console
 from coding_agent.domain import AssistantExchange, TextBlock, UserExchange
 from coding_agent.providers.fake import FakeProvider
 from coding_agent.runtime import RuntimeSettings, create_runtime
@@ -28,6 +30,33 @@ def test_runtime_settings_use_environment_without_exposing_private_values(tmp_pa
     assert settings.data_root == (tmp_path / "data").resolve()
     assert "private-test-credential" not in repr(settings)
     assert "private.example" not in repr(settings)
+
+
+def test_runtime_settings_load_user_provider_profile(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[general]
+default_model = "local/claude-example"
+
+[providers.local]
+base_url = "https://example.invalid/anthropic"
+api_key_env = "LOCAL_PROVIDER_KEY"
+models = ["claude-example"]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    settings = RuntimeSettings.load(
+        workspace=tmp_path,
+        model=None,
+        environ={"LOCAL_PROVIDER_KEY": "private-test-credential"},
+        data_root=tmp_path / "data",
+        config_path=config_path,
+    )
+
+    assert settings.model == "claude-example"
+    assert settings.sdk_base_url == "https://example.invalid/anthropic/"
 
 
 @pytest.mark.asyncio
@@ -97,3 +126,12 @@ async def test_repl_accepts_multiple_turns_and_exits_without_provider_work(tmp_p
     assert provider.request_count == 2
     assert "answer one" in "".join(output)
     assert "answer two" in "".join(output)
+
+
+def test_console_output_does_not_treat_model_text_as_rich_markup() -> None:
+    stream = StringIO()
+    console = Console(file=stream, force_terminal=False)
+
+    write_console(console, "[build-system]")
+
+    assert stream.getvalue() == "[build-system]"

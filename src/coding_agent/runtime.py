@@ -1,0 +1,231 @@
+from __future__ import annotations
+
+import os
+import tomllib
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from anthropic import AsyncAnthropic
+from platformdirs import user_config_path, user_data_path
+
+from coding_agent.application import AgentApplication
+from coding_agent.memory.loader import ProjectMemoryLoader
+from coding_agent.providers.anthropic import AnthropicMessagesProvider
+from coding_agent.providers.base import Provider
+from coding_agent.providers.config import normalize_sdk_base_url
+from coding_agent.sessions.jsonl import JsonlSessionRepository, Redactor
+from coding_agent.tools.builtin import BuiltinToolSource
+from coding_agent.tools.catalog import ToolCatalog
+from coding_agent.tools.dispatcher import ToolDispatcher
+
+
+class RuntimeConfigurationError(ValueError):
+    """The local runtime configuration is missing or invalid."""
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeSettings:
+    workspace: Path
+    data_root: Path
+    model: str
+    base_url: str = field(repr=False)
+    api_key: str = field(repr=False)
+    max_tokens: int = 4096
+    max_steps: int = 20
+
+    @classmethod
+    def from_environment(
+        cls,
+        *,
+        workspace: Path,
+        model: str | None,
+        environ: Mapping[str, str] | None = None,
+        data_root: Path | None = None,
+        max_tokens: int = 4096,
+        max_steps: int = 20,
+    ) -> RuntimeSettings:
+        return cls.load(
+            workspace=workspace,
+            model=model,
+            environ=environ,
+            data_root=data_root,
+            config_path=Path("__missing_user_config__"),
+            max_tokens=max_tokens,
+            max_steps=max_steps,
+        )
+
+    @classmethod
+    def load(
+        cls,
+        *,
+        workspace: Path,
+        model: str | None,
+        environ: Mapping[str, str] | None = None,
+        data_root: Path | None = None,
+        config_path: Path | None = None,
+        max_tokens: int = 4096,
+        max_steps: int = 20,
+    ) -> RuntimeSettings:
+        values = os.environ if environ is None else environ
+        config = _read_config(config_path or user_config_path("codingAgent") / "config.toml")
+        general = _mapping(config.get("general"))
+        selected_model = model or values.get("CODING_AGENT_MODEL") or general.get("default_model")
+        if not isinstance(selected_model, str) or not selected_model.strip():
+            raise RuntimeConfigurationError(
+                "Missing model: pass --model, set CODING_AGENT_MODEL, "
+                "or configure general.default_model"
+            )
+        selected_model = selected_model.strip()
+
+        provider = _select_provider(config, selected_model)
+        configured_url = values.get("CODING_AGENT_BASE_URL") or provider.get("base_url")
+        if not isinstance(configured_url, str) or not configured_url.strip():
+            raise RuntimeConfigurationError("Missing Provider Base URL")
+        key_environment = provider.get("api_key_env", "CODING_AGENT_API_KEY")
+        if not isinstance(key_environment, str):
+            raise RuntimeConfigurationError("Provider api_key_env must be a string")
+        credential = values.get("CODING_AGENT_API_KEY") or values.get(key_environment)
+        if not credential:
+            raise RuntimeConfigurationError(
+                "Missing API key environment variable: CODING_AGENT_API_KEY"
+            )
+        if max_tokens <= 0 or max_steps <= 0:
+            raise RuntimeConfigurationError("Token and step limits must be positive")
+        resolved_workspace = workspace.resolve()
+        if not resolved_workspace.is_dir():
+            raise RuntimeConfigurationError("Workspace must be an existing directory")
+        try:
+            normalize_sdk_base_url(configured_url)
+        except ValueError as error:
+            raise RuntimeConfigurationError(str(error)) from error
+        selected_data_root = (data_root or user_data_path("codingAgent")).resolve()
+        model_id = selected_model.split("/", 1)[-1]
+        return cls(
+            workspace=resolved_workspace,
+            data_root=selected_data_root,
+            model=model_id,
+            base_url=configured_url.strip(),
+            api_key=credential,
+            max_tokens=max_tokens,
+            max_steps=max_steps,
+        )
+
+    @property
+    def sdk_base_url(self) -> str:
+        return normalize_sdk_base_url(self.base_url)
+
+
+@dataclass(slots=True)
+class AgentRuntime:
+    application: AgentApplication
+    session_id: str
+    _client: AsyncAnthropic | None = field(default=None, repr=False)
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.close()
+
+    async def __aenter__(self) -> AgentRuntime:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        await self.aclose()
+
+
+async def create_runtime(
+    settings: RuntimeSettings,
+    *,
+    resume: bool = False,
+    provider: Provider | None = None,
+) -> AgentRuntime:
+    project_root = discover_project_root(settings.workspace)
+    sessions = JsonlSessionRepository(
+        settings.data_root,
+        redactor=Redactor((settings.api_key, settings.base_url, settings.sdk_base_url)),
+    )
+    recovered = await sessions.resume_latest(project_root) if resume else None
+    if resume and recovered is None:
+        raise RuntimeConfigurationError("No session exists for this project")
+    if recovered is None:
+        store = await sessions.create(project_root)
+        initial_exchanges = ()
+    else:
+        store = recovered.store
+        initial_exchanges = recovered.conversation
+
+    client: AsyncAnthropic | None = None
+    selected_provider = provider
+    if selected_provider is None:
+        credential = settings.api_key
+        client_options: dict[str, Any] = {
+            "api_key": credential,
+            "base_url": settings.sdk_base_url,
+            "max_retries": 2,
+        }
+        client = AsyncAnthropic(**client_options)
+        selected_provider = AnthropicMessagesProvider(
+            client=client,
+            model=settings.model,
+            max_tokens=settings.max_tokens,
+        )
+
+    catalog = await ToolCatalog.create((BuiltinToolSource(project_root),))
+    application = AgentApplication(
+        selected_provider,
+        ToolDispatcher(catalog),
+        store,
+        max_steps=settings.max_steps,
+        memory_loader=ProjectMemoryLoader(project_root, settings.workspace),
+        initial_exchanges=initial_exchanges,
+    )
+    return AgentRuntime(application, store.session_id, client)
+
+
+def discover_project_root(workspace: Path) -> Path:
+    resolved = workspace.resolve()
+    for candidate in (resolved, *resolved.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return resolved
+
+
+def _read_config(path: Path) -> dict[str, object]:
+    if not path.is_file():
+        return {}
+    try:
+        with path.open("rb") as stream:
+            parsed = tomllib.load(stream)
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise RuntimeConfigurationError("Unable to read user configuration") from error
+    return parsed
+
+
+def _select_provider(config: Mapping[str, object], model: str) -> dict[str, object]:
+    providers = _mapping(config.get("providers"))
+    if not providers:
+        return {}
+    provider_name = model.split("/", 1)[0] if "/" in model else None
+    if provider_name is not None:
+        return _mapping(providers.get(provider_name))
+    matches = [
+        _mapping(value)
+        for value in providers.values()
+        if model in _string_list(_mapping(value).get("models"))
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(providers) == 1:
+        return _mapping(next(iter(providers.values())))
+    return {}
+
+
+def _mapping(value: object) -> dict[str, object]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _string_list(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(item for item in value if isinstance(item, str))

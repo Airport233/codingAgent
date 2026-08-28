@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 
 from coding_agent.domain import (
     AssistantExchange,
     Conversation,
+    ConversationExchange,
     ToolContinuationExchange,
     UserExchange,
 )
@@ -32,6 +33,7 @@ class AgentApplication:
         sessions: SessionStore,
         max_steps: int = 20,
         memory_loader: ProjectMemoryLoader | None = None,
+        initial_exchanges: Sequence[ConversationExchange] = (),
     ) -> None:
         self._provider = provider
         self._dispatcher = dispatcher
@@ -39,7 +41,7 @@ class AgentApplication:
         self._max_steps = max_steps
         self._memory_loader = memory_loader
         self._last_memory_digest: str | None = None
-        self._conversation = Conversation()
+        self._conversation = Conversation(list(initial_exchanges))
 
     async def run(self, prompt: str) -> AsyncIterator[CoreEvent]:
         user_exchange = UserExchange(content=prompt)
