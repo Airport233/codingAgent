@@ -143,6 +143,10 @@ async def test_slash_popup_filters_navigates_completes_and_dismisses() -> None:
         assert choices.option_count == 2
         assert choices.get_option_at_index(0).id == "provider/model"
 
+        await pilot.press("down", "up", "tab")
+        await pilot.pause()
+        assert composer.value == "/model provider/model"
+
         await pilot.press("escape")
         await pilot.pause()
         assert popup.display is False
@@ -150,6 +154,40 @@ async def test_slash_popup_filters_navigates_completes_and_dismisses() -> None:
         await pilot.press("backspace")
         await pilot.pause()
         assert popup.display is True
+
+
+async def test_slash_popup_handles_plain_completion_and_no_matches() -> None:
+    app = CodingAgentTui(
+        application_with_response(),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer", PromptTextArea)
+        popup = app.query_one("#completion-popup")
+        choices = app.query_one("#completion-options", OptionList)
+
+        composer.value = "/con"
+        await pilot.pause()
+        await pilot.press("tab")
+        assert composer.value == "/context"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "Context management is unavailable." in str(app.query_one(".notice").render())
+
+        composer.value = "/does-not-exist"
+        await pilot.pause()
+        assert popup.display is True
+        assert choices.highlighted is None
+        assert "No matches" in str(choices.get_option_at_index(0).prompt)
+        await pilot.press("enter")
+        assert composer.value == "/does-not-exist"
+
+        composer.value = "/context extra"
+        await pilot.pause()
+        assert popup.display is False
 
 
 async def test_model_command_opens_secondary_picker_and_switches_selection() -> None:
