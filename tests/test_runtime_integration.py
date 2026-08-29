@@ -669,6 +669,28 @@ async def test_repl_shows_shell_details_and_toggles_thinking() -> None:
 
 
 @pytest.mark.asyncio
+async def test_repl_shows_and_switches_approval_mode() -> None:
+    application = AgentApplication(
+        FakeProvider([]),
+        ToolDispatcher(ToolCatalog({})),
+        InMemorySessionStore(),
+        approval_policy=ConfigurableApprovalPolicy("auto", frozenset({"shell"})),
+    )
+    inputs: Iterator[str] = iter(("/mode", "/mode deny", "/exit"))
+    output: list[str] = []
+
+    async def read_input() -> str:
+        return next(inputs)
+
+    await run_repl(application, read_input=read_input, write_output=output.append)
+
+    rendered = "".join(output)
+    assert "Approval mode: auto" in rendered
+    assert "Approval mode switched to deny." in rendered
+    assert application.approval_mode() == "deny"
+
+
+@pytest.mark.asyncio
 async def test_repl_hides_thinking_content_by_default() -> None:
     provider = FakeProvider(
         [

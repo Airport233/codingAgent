@@ -220,6 +220,76 @@ async def test_classify_override_ignores_allow_session_for_forced_ask() -> None:
 
 
 @pytest.mark.asyncio
+async def test_approval_mode_reports_and_updates_live_for_the_default_policy() -> None:
+    application = AgentApplication(
+        FakeProvider([]),
+        ToolDispatcher(ToolCatalog({})),
+        InMemorySessionStore(),
+        approval_policy=ConfigurableApprovalPolicy("auto", frozenset({"shell"})),
+    )
+
+    assert application.approval_mode() == "auto"
+    assert application.set_approval_mode("deny") is True
+    assert application.approval_mode() == "deny"
+
+
+@pytest.mark.asyncio
+async def test_approval_mode_is_unavailable_for_a_custom_policy() -> None:
+    class AlwaysAllow:
+        def evaluate(self, call: ToolUseBlock) -> str:
+            del call
+            return "allow"
+
+        def remember(self, call: ToolUseBlock, decision: str) -> None:
+            del call, decision
+
+    application = AgentApplication(
+        FakeProvider([]),
+        ToolDispatcher(ToolCatalog({})),
+        InMemorySessionStore(),
+        approval_policy=AlwaysAllow(),
+    )
+
+    assert application.approval_mode() is None
+    assert application.set_approval_mode("deny") is False
+
+
+@pytest.mark.asyncio
+async def test_switching_mode_mid_turn_affects_the_next_tool_call_not_the_current_one() -> None:
+    shell = RecordingShell()
+    application = AgentApplication(
+        FakeProvider(
+            [
+                AssistantExchange(
+                    (
+                        ToolUseBlock("call-1", "shell", {"command": "one"}),
+                        ToolUseBlock("call-2", "shell", {"command": "two"}),
+                    ),
+                    "tool_use",
+                ),
+                AssistantExchange((TextBlock("done"),), "end_turn"),
+            ]
+        ),
+        ToolDispatcher(ToolCatalog({"shell": shell})),
+        InMemorySessionStore(),
+        approval_policy=ConfigurableApprovalPolicy("auto", frozenset({"shell"})),
+    )
+
+    events = application.run("run both")
+    saw_first_finish = False
+    async for event in events:
+        if isinstance(event, ToolFinished) and event.call_id == "call-1" and not saw_first_finish:
+            saw_first_finish = True
+            assert application.set_approval_mode("ask") is True
+        if isinstance(event, ApprovalRequested):
+            assert event.call_id == "call-2"
+            await application.resolve_approval(event.request_id, "allow_once")
+
+    assert saw_first_finish
+    assert shell.commands == ["one", "two"]
+
+
+@pytest.mark.asyncio
 async def test_deny_policy_never_requests_or_executes() -> None:
     shell = RecordingShell()
     application = AgentApplication(

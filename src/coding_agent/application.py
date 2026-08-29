@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Callable, Sequence
 
 from coding_agent.approval import (
     ApprovalDecision,
+    ApprovalMode,
     ApprovalPolicy,
     ConfigurableApprovalPolicy,
 )
@@ -110,6 +111,22 @@ class AgentApplication:
     def compaction_history(self) -> tuple[CompactionRecord, ...]:
         """Return durable compaction events with their original transcript positions."""
         return self._compaction_history
+
+    def approval_mode(self) -> ApprovalMode | None:
+        """Return the live approval mode, or None if the policy doesn't expose one."""
+        if isinstance(self._approval_policy, ConfigurableApprovalPolicy):
+            return self._approval_policy.mode
+        return None
+
+    def set_approval_mode(self, mode: ApprovalMode) -> bool:
+        """Change the approval mode in place; takes effect on the next evaluate() call.
+
+        Returns False if the configured policy doesn't support live mode changes.
+        """
+        if isinstance(self._approval_policy, ConfigurableApprovalPolicy):
+            self._approval_policy.mode = mode
+            return True
+        return False
 
     async def resolve_approval(self, request_id: str, decision: ApprovalDecision) -> bool:
         pending = self._pending_approvals.get(request_id)

@@ -48,6 +48,7 @@ async def test_slash_help_uses_one_aligned_command_per_line() -> None:
         "Commands:",
         "  /help                    Show available commands",
         "  /model [provider/model]  Show or choose a model",
+        "  /mode [auto|ask|deny]    Show or set approval mode",
         "  /context                 Show context usage",
         "  /compact                 Compact conversation context",
         "  /thinking                Toggle thinking details",
@@ -63,6 +64,92 @@ def application_with_response(text: str = "Finished successfully.") -> AgentAppl
         ToolDispatcher(ToolCatalog({})),
         InMemorySessionStore(),
     )
+
+
+async def test_composer_shows_the_live_approval_mode_in_its_border_title() -> None:
+    application = AgentApplication(
+        FakeProvider([]),
+        ToolDispatcher(ToolCatalog({})),
+        InMemorySessionStore(),
+        approval_policy=ConfigurableApprovalPolicy("ask", frozenset({"shell"})),
+    )
+    app = CodingAgentTui(
+        application,
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        composer = app.query_one("#composer", PromptTextArea)
+        assert composer.border_title == "mode: ask"
+
+
+async def test_shift_tab_cycles_approval_mode_and_updates_the_indicator() -> None:
+    application = AgentApplication(
+        FakeProvider([]),
+        ToolDispatcher(ToolCatalog({})),
+        InMemorySessionStore(),
+        approval_policy=ConfigurableApprovalPolicy("auto", frozenset({"shell"})),
+    )
+    app = CodingAgentTui(
+        application,
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        composer = app.query_one("#composer", PromptTextArea)
+        assert composer.border_title == "mode: auto"
+
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        assert composer.border_title == "mode: ask"
+        assert application.approval_mode() == "ask"
+        assert "Approval mode switched to ask" in str(app.query_one(".notice").render())
+
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        assert composer.border_title == "mode: deny"
+
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        assert composer.border_title == "mode: auto"
+
+
+async def test_mode_slash_command_shows_and_sets_approval_mode() -> None:
+    application = AgentApplication(
+        FakeProvider([]),
+        ToolDispatcher(ToolCatalog({})),
+        InMemorySessionStore(),
+        approval_policy=ConfigurableApprovalPolicy("auto", frozenset({"shell"})),
+    )
+    app = CodingAgentTui(
+        application,
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer", PromptTextArea)
+        composer.value = "/mode"
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert "Approval mode: auto" in str(app.query_one(".notice").render())
+
+        composer.value = "/mode deny"
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert application.approval_mode() == "deny"
+        assert app.query_one("#composer", PromptTextArea).border_title == "mode: deny"
 
 
 async def test_tui_composes_full_screen_workspace() -> None:
@@ -271,7 +358,7 @@ async def test_slash_popup_filters_navigates_completes_and_dismisses() -> None:
         assert popup.display is True
         assert choices.option_count >= 7
 
-        composer.value = "/mo"
+        composer.value = "/model"
         await pilot.pause()
         await pilot.pause()
         assert choices.option_count == 1
@@ -317,7 +404,7 @@ async def test_slash_popup_allocates_visible_rows_for_every_command_match() -> N
 
         for prefix, expected in (
             ("/c", ("/context", "/compact", "/clear")),
-            ("/m", ("/model",)),
+            ("/m", ("/model", "/mode")),
             ("/r", ("/resume",)),
             ("/h", ("/help",)),
             ("/t", ("/thinking",)),
