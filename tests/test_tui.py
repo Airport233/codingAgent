@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import sys
 from collections.abc import AsyncIterator
-from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
@@ -29,7 +28,7 @@ from coding_agent.providers.base import ProviderEvent, ProviderResponseFinished
 from coding_agent.providers.fake import FakeProvider
 from coding_agent.sessions.jsonl import SessionSummary
 from coding_agent.sessions.memory import InMemorySessionStore
-from coding_agent.skills import SkillDefinition, SkillSnapshot
+from coding_agent.skills import SkillLoader
 from coding_agent.tools.base import ToolOutput, ToolSpec
 from coding_agent.tools.catalog import ToolCatalog
 from coding_agent.tools.dispatcher import ToolDispatcher
@@ -77,31 +76,7 @@ def application_with_skills(text: str = "Skill completed.") -> AgentApplication:
         FakeProvider([AssistantExchange((TextBlock(text),), "end_turn")]),
         ToolDispatcher(ToolCatalog({})),
         InMemorySessionStore(),
-        skills=SkillSnapshot(
-            (
-                SkillDefinition(
-                    "code-review",
-                    "Review code changes",
-                    "Report concrete defects only.",
-                    "builtin",
-                    Path("code-review.md"),
-                ),
-                SkillDefinition(
-                    "test-fix",
-                    "Fix a failing test",
-                    "Reproduce the failure first.",
-                    "builtin",
-                    Path("test-fix.md"),
-                ),
-                SkillDefinition(
-                    "project-init",
-                    "Draft project memory",
-                    "Inspect the project and draft instructions without writing files.",
-                    "builtin",
-                    Path("project-init.md"),
-                ),
-            )
-        ),
+        skills=SkillLoader.default().load(),
     )
 
 

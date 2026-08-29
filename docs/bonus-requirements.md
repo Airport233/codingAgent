@@ -32,7 +32,7 @@
 
 ### 3.1 用户价值
 
-Skill 是可发现、可检查、按需加载的编码工作流。它不创建第二个 Agent，也不绕过现有工具系统；其作用是把特定任务需要的步骤、约束和完成标准注入当前轮次，降低模型遗漏验证步骤的概率。
+Skill 是可发现、可检查、按需加载的编码工作流。实现遵循 [Agent Skills Specification](https://agentskills.io/specification)：每个 Skill 是独立目录，以 `SKILL.md` 为固定入口，并可包含 `scripts/`、`references/` 和 `assets/`。它不创建第二个 Agent，也不绕过现有工具系统；其作用是把特定任务需要的步骤、约束和完成标准注入当前轮次，降低模型遗漏验证步骤的概率。
 
 首批内置 Skill：
 
@@ -42,8 +42,8 @@ Skill 是可发现、可检查、按需加载的编码工作流。它不创建�
 
 ### 3.2 功能需求
 
-- **BONUS-SKILL-001** Skill 使用项目内置 Markdown 文件保存，包含名称、描述和正文。
-- **BONUS-SKILL-002** 系统启动时加载内置 Skill，并允许未来从用户级目录和项目目录增加 Skill。
+- **BONUS-SKILL-001** Skill 使用 `<skill-name>/SKILL.md` 保存，入口包含 YAML frontmatter 与 Markdown 正文，`name` 必须匹配目录名。
+- **BONUS-SKILL-002** 系统启动时只加载内置、用户级和项目级 Skill 的名称、描述与来源，不预加载正文。
 - **BONUS-SKILL-003** 同名 Skill 按 `builtin < user < project` 覆盖，来源必须可见。
 - **BONUS-SKILL-004** `/skills` 展示可用 Skill、描述和来源。
 - **BONUS-SKILL-005** `/skill <name> <task>` 在当前会话提交一个带明确边界的 Skill 任务。
@@ -51,10 +51,13 @@ Skill 是可发现、可检查、按需加载的编码工作流。它不创建�
 - **BONUS-SKILL-007** 会话事件保存用户原始任务和所选 Skill 名称，恢复后可审计。
 - **BONUS-SKILL-008** Skill 正文按需注入，不应在每轮把全部 Skill 正文占满上下文。
 - **BONUS-SKILL-009** Skill 不得扩大 Shell、文件或审批权限。
+- **BONUS-SKILL-010** 模型可根据常驻 metadata 调用 `activate_skill`；激活后下一步才加载对应 `SKILL.md` 正文。
+- **BONUS-SKILL-011** 正文引用的 `references/`、`scripts/` 或 `assets/` 文本通过 `read_skill_resource` 按需读取，并受目录逃逸、符号链接、编码和大小限制；二进制资产不会被误当作文本注入上下文。
+- **BONUS-SKILL-012** `allowed-tools` 作为实验性标准字段被解析但不自动授权，现有审批策略始终优先。
 
 ### 3.3 演示脚本
 
-输入 `/skills` 展示三个工作流；随后输入 `/skill test-fix 修复这个失败测试`。TUI 显示正在使用的 Skill，Agent 按“复现→定位→修改→验证”完成一个真实缺陷。该片段可同时展示 Slash 补全、工具调用、测试执行和最终结果。
+输入 `/skills` 展示四个工作流；随后输入 `/skill test-fix 修复这个失败测试`。TUI 显示正在使用的 Skill，Agent 按“复现→定位→修改→验证”完成一个真实缺陷。还可用普通自然语言触发模型先调用 `activate_skill`，证明 metadata 与正文的渐进式披露。该片段可同时展示 Slash 补全、工具调用、测试执行和最终结果。
 
 ### 3.4 完成标准
 
@@ -62,7 +65,7 @@ Skill 是可发现、可检查、按需加载的编码工作流。它不创建�
 - `/skills`、Slash 补全和 `/skill` 具有 TUI 测试；
 - Skill 选择通过 Application/CoreEvent 进入核心，不在 TUI 中拼接隐藏提示；
 - 恢复后的事件记录能说明该轮使用了哪个 Skill；
-- 未启用 Skill 的普通对话行为完全不变。
+- 未启用 Skill 的普通对话只增加简短 metadata 目录，不注入任何 Skill 正文。
 
 ## 4. B2：任务计划与进度卡片
 

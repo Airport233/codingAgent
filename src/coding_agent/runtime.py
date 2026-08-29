@@ -24,6 +24,7 @@ from coding_agent.tools.builtin import BuiltinToolSource
 from coding_agent.tools.catalog import ToolCatalog
 from coding_agent.tools.dispatcher import ToolDispatcher
 from coding_agent.tools.shell import ShellConfig
+from coding_agent.tools.skills import SkillToolSource
 
 
 class RuntimeConfigurationError(ValueError):
@@ -285,6 +286,10 @@ async def create_runtime(
         )
 
     plan_state = PlanState(recovered.plan if recovered is not None else ())
+    skills = SkillLoader.default(
+        user_dir=settings.data_root / "skills",
+        project_dir=project_root / ".coding-agent" / "skills",
+    ).load()
     catalog = await ToolCatalog.create(
         (
             BuiltinToolSource(
@@ -292,6 +297,7 @@ async def create_runtime(
                 shell_config=ShellConfig(mode=settings.approval_mode),
                 plan_state=plan_state,
             ),
+            SkillToolSource(skills),
         )
     )
     context_manager = ContextManager(
@@ -320,10 +326,7 @@ async def create_runtime(
             mode=settings.approval_mode,
             guarded_tools=frozenset({"shell"}),
         ),
-        skills=SkillLoader.default(
-            user_dir=settings.data_root / "skills",
-            project_dir=project_root / ".coding-agent" / "skills",
-        ).load(),
+        skills=skills,
         plan_state=plan_state,
     )
     return AgentRuntime(application, store.session_id, client)

@@ -1,7 +1,7 @@
-+++
-name = "code-review"
-description = "Review code changes for concrete, actionable defects"
-+++
+---
+name: code-review
+description: Review code changes for concrete, actionable defects. Use when the user asks for a code review, diff review, regression analysis, or pre-merge risk assessment.
+---
 
 # Code Review Workflow
 

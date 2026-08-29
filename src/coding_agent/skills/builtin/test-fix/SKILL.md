@@ -1,7 +1,7 @@
-+++
-name = "test-fix"
-description = "Reproduce, diagnose, fix, and verify a failing test"
-+++
+---
+name: test-fix
+description: Reproduce, diagnose, fix, and verify failing tests. Use when tests or CI fail, a regression needs a focused test, or the user asks to repair a broken test suite.
+---
 
 # Test Fix Workflow
 

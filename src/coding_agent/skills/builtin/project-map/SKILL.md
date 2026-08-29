@@ -1,7 +1,7 @@
-+++
-name = "project-map"
-description = "Map a repository's entry points, architecture, tests, and workflows"
-+++
+---
+name: project-map
+description: Map a repository's entry points, architecture, tests, and workflows. Use when entering an unfamiliar codebase, explaining project structure, or locating safe extension points.
+---
 
 # Project Map Workflow
 

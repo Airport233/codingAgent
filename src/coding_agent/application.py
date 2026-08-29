@@ -157,6 +157,9 @@ class AgentApplication:
 
     def _load_system_instructions(self, active_skill: SkillDefinition | None = None) -> str | None:
         sections: list[str] = []
+        skill_catalog = self._skills.render_catalog()
+        if skill_catalog:
+            sections.append(skill_catalog)
         if self._memory_loader is not None:
             memory = self._memory_loader.load().rendered
             if memory:
@@ -223,7 +226,15 @@ class AgentApplication:
 
         for _step in range(self._max_steps):
             response: AssistantExchange | None = None
-            system_instructions = self._load_system_instructions(active_skill)
+            try:
+                system_instructions = self._load_system_instructions(active_skill)
+            except (OSError, UnicodeError, ValueError) as error:
+                message = f"Unable to load active skill: {self._redacted_text(error)}"
+                await self._sessions.append(
+                    "turn_failed", {"phase": "skill_activation", "message": message}
+                )
+                yield AgentFailed(message=message)
+                return
             if self._memory_loader is not None:
                 memory = self._memory_loader.load()
                 if memory.digest != self._last_memory_digest:
@@ -520,6 +531,24 @@ class AgentApplication:
                             },
                         )
                         yield PlanUpdated(steps, explanation)
+                    if call.name == "activate_skill" and not result.is_error:
+                        activated_name = result.metadata.get("skill_name")
+                        activated = (
+                            self._skills.get(activated_name)
+                            if isinstance(activated_name, str)
+                            else None
+                        )
+                        if activated is not None:
+                            active_skill = activated
+                            await self._sessions.append(
+                                "skill_invoked",
+                                {
+                                    "name": activated.name,
+                                    "source": activated.source,
+                                    "task": prompt,
+                                    "activation": "model",
+                                },
+                            )
                     if stop_message is not None:
                         results.extend(
                             self._no_progress_skipped_results(response.tool_uses[call_index + 1 :])

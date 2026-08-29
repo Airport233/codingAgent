@@ -26,7 +26,7 @@ from coding_agent.providers.fake import FakeProvider
 from coding_agent.runtime import RuntimeConfigurationError, RuntimeSettings, create_runtime
 from coding_agent.sessions.jsonl import Redactor
 from coding_agent.sessions.memory import InMemorySessionStore
-from coding_agent.skills import SkillDefinition, SkillSnapshot
+from coding_agent.skills import SkillLoader, SkillSnapshot
 from coding_agent.tools.base import ToolOutput
 from coding_agent.tools.catalog import ToolCatalog
 from coding_agent.tools.dispatcher import ToolDispatcher
@@ -97,10 +97,11 @@ async def test_new_runtime_does_not_persist_an_empty_session(tmp_path: Path) -> 
 @pytest.mark.asyncio
 async def test_runtime_loads_builtin_and_project_override_skills(tmp_path: Path) -> None:
     project_skills = tmp_path / ".coding-agent" / "skills"
-    project_skills.mkdir(parents=True)
-    (project_skills / "test-fix.md").write_text(
-        '+++\nname = "test-fix"\ndescription = "Project-specific test workflow"\n'
-        "+++\n\nRun the project smoke test first.\n",
+    test_fix = project_skills / "test-fix"
+    test_fix.mkdir(parents=True)
+    (test_fix / "SKILL.md").write_text(
+        "---\nname: test-fix\ndescription: Project-specific test workflow\n"
+        "---\n\nRun the project smoke test first.\n",
         encoding="utf-8",
     )
     settings = RuntimeSettings.from_environment(
@@ -116,15 +117,24 @@ async def test_runtime_loads_builtin_and_project_override_skills(tmp_path: Path)
     runtime = await create_runtime(settings, provider=FakeProvider([]))
 
     assert runtime.application.available_skills() == (
-        ("code-review", "Review code changes for concrete, actionable defects", "builtin"),
+        (
+            "code-review",
+            "Review code changes for concrete, actionable defects. Use when the user asks "
+            "for a code review, diff review, regression analysis, or pre-merge risk assessment.",
+            "builtin",
+        ),
         (
             "project-init",
-            "Draft safe project memory instructions without writing files",
+            "Draft safe project memory instructions without writing files. Use when the user "
+            "runs /init or asks to create, refresh, or preview repository guidance for future "
+            "coding-agent sessions.",
             "builtin",
         ),
         (
             "project-map",
-            "Map a repository's entry points, architecture, tests, and workflows",
+            "Map a repository's entry points, architecture, tests, and workflows. Use when "
+            "entering an unfamiliar codebase, explaining project structure, or locating safe "
+            "extension points.",
             "builtin",
         ),
         ("test-fix", "Project-specific test workflow", "project"),
@@ -535,14 +545,8 @@ async def test_repl_lists_and_runs_a_skill() -> None:
         ToolDispatcher(ToolCatalog({})),
         InMemorySessionStore(),
         skills=SkillSnapshot(
-            (
-                SkillDefinition(
-                    "test-fix",
-                    "Fix a failing test",
-                    "Reproduce first.",
-                    "builtin",
-                    Path("test-fix.md"),
-                ),
+            tuple(
+                skill for skill in SkillLoader.default().load().skills if skill.name == "test-fix"
             )
         ),
     )
@@ -556,10 +560,10 @@ async def test_repl_lists_and_runs_a_skill() -> None:
 
     rendered = "".join(output)
     assert "test-fix" in rendered
-    assert "Fix a failing test" in rendered
+    assert "Reproduce, diagnose, fix" in rendered
     assert "[skill] test-fix" in rendered
     assert "fixed" in rendered
-    assert "Reproduce first." in provider.system_instructions[0]
+    assert "Run the narrowest command that reliably reproduces" in provider.system_instructions[0]
 
 
 @pytest.mark.asyncio
@@ -570,14 +574,10 @@ async def test_repl_init_runs_preview_only_project_memory_workflow() -> None:
         ToolDispatcher(ToolCatalog({})),
         InMemorySessionStore(),
         skills=SkillSnapshot(
-            (
-                SkillDefinition(
-                    "project-init",
-                    "Draft project memory",
-                    "Inspect and draft only; do not write files.",
-                    "builtin",
-                    Path("project-init.md"),
-                ),
+            tuple(
+                skill
+                for skill in SkillLoader.default().load().skills
+                if skill.name == "project-init"
             )
         ),
     )
@@ -592,7 +592,8 @@ async def test_repl_init_runs_preview_only_project_memory_workflow() -> None:
     rendered = "".join(output)
     assert "[skill] project-init" in rendered
     assert "draft ready" in rendered
-    assert "do not write files" in provider.system_instructions[0]
+    assert "strictly preview-only" in provider.system_instructions[0]
+    assert "Do not create, modify, or overwrite" in provider.system_instructions[0]
 
 
 @pytest.mark.asyncio
