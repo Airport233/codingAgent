@@ -52,6 +52,7 @@ class SkillInstaller:
                 "skills",
                 "add",
                 source,
+                "--all",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
