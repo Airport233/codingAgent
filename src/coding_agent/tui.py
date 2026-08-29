@@ -14,7 +14,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
-from textual.screen import Screen
+from textual.screen import ModalScreen, Screen
 from textual.timer import Timer
 from textual.widgets import Collapsible, Footer, Label, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
@@ -286,8 +286,13 @@ class ResumeSessionScreen(Screen[str | None]):
         )
 
 
-class ApprovalScreen(Screen[tuple[str, ApprovalDecision]]):
-    """Blocking choice for a tool invocation that requires user approval."""
+class ApprovalScreen(ModalScreen[tuple[str, ApprovalDecision]]):
+    """Small dialog over the dimmed conversation for a tool call needing approval.
+
+    Deliberately not a full-screen takeover: the transcript stays visible
+    behind the dialog, and the tool details panel is bounded rather than
+    stretched to fill the terminal.
+    """
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("escape,ctrl+c", "deny", "Deny", show=True),
@@ -298,31 +303,46 @@ class ApprovalScreen(Screen[tuple[str, ApprovalDecision]]):
         self.request = event
 
     def compose(self) -> ComposeResult:
-        yield Static("Permission required", id="approval-title")
-        title = _tool_title(
-            ToolStarted(self.request.call_id, self.request.tool_name, self.request.arguments)
-        )
-        details = f"{title}\n\n{_tool_arguments(self.request.arguments)}"
-        if self.request.guardian_note:
-            details += f"\n\n[Guardian] {self.request.guardian_note}"
-        yield Static(
-            details,
-            markup=False,
-            id="approval-details",
-        )
-        yield OptionList(
-            Option("Allow once", id="allow_once"),
-            Option("Always allow this tool for this session", id="allow_session"),
-            Option("Deny", id="deny"),
-            id="approval-options",
-            markup=False,
-        )
-        yield Static("↑/↓ select · Enter confirm · Esc deny", id="approval-help")
+        with Vertical(id="approval-dialog"):
+            yield Static("Permission required", id="approval-title")
+            title = _tool_title(
+                ToolStarted(self.request.call_id, self.request.tool_name, self.request.arguments)
+            )
+            details = f"{title}\n\n{_tool_arguments(self.request.arguments)}"
+            if self.request.guardian_note:
+                details += f"\n\n[Guardian] {self.request.guardian_note}"
+            with VerticalScroll(id="approval-details"):
+                yield Static(details, markup=False, id="approval-details-text")
+            yield OptionList(
+                Option("Allow once", id="allow_once"),
+                Option("Always allow this tool for this session", id="allow_session"),
+                Option("Deny", id="deny"),
+                id="approval-options",
+                markup=False,
+            )
+            yield Static("↑/↓ select · Enter confirm · Esc deny", id="approval-help")
 
     def on_mount(self) -> None:
         choices = self.query_one("#approval-options", OptionList)
         choices.highlighted = 0
         choices.focus()
+
+    def on_resize(self, event: object) -> None:
+        """Keep the dialog bounded inside the terminal as the window resizes.
+
+        Textual's CSS ``max-height: 90%`` is not reliably honored on an
+        auto-height container, so the cap is computed against the live screen
+        size instead. The approval buttons (#approval-options) are always kept
+        fully visible; the details panel absorbs whatever remains.
+        """
+        del event
+        dialog = self.query_one("#approval-dialog", Vertical)
+        # Leave a 2-cell margin top/bottom; never smaller than the three
+        # fixed rows (title + options + help) plus padding.
+        cap = max(7, self.size.height - 2)
+        dialog.styles.max_height = cap
+        details = self.query_one("#approval-details", VerticalScroll)
+        details.styles.max_height = max(2, cap - 8)
 
     @on(OptionList.OptionSelected, "#approval-options")
     def select_decision(self, event: OptionList.OptionSelected) -> None:

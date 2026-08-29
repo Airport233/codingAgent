@@ -178,36 +178,47 @@ ResumeSessionScreen {
 }
 
 ApprovalScreen {
-    background: #0b0f14;
+    align: center bottom;
+    background: rgba(11, 15, 20, 0.45);
     color: #d7dde5;
-    layout: vertical;
-    padding: 2 4;
+}
+
+#approval-dialog {
+    width: 100%;
+    max-width: 100%;
+    min-width: 30;
+    height: auto;
+    max-height: 90%;
+    background: #0b0f14;
+    border-top: round #fbbf24;
+    border-bottom: round #fbbf24;
+    padding: 0 2 1 2;
 }
 
 #approval-title {
-    height: 3;
-    padding: 1 2;
+    height: 1;
     color: #fbbf24;
     text-style: bold;
     border-bottom: solid #854d0e;
 }
 
 #approval-details {
-    height: 1fr;
-    padding: 1 2;
+    height: auto;
+    max-height: 8;
+    padding: 1 1;
     background: #111821;
     border: round #334155;
 }
 
 #approval-options {
-    height: 7;
+    height: 5;
     margin-top: 1;
     background: #111821;
     border: round #fbbf24;
 }
 
 #approval-help {
-    height: 2;
+    height: 1;
     padding: 0 1;
     color: #94a3b8;
 }

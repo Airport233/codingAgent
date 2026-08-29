@@ -592,7 +592,7 @@ async def test_tui_approval_screen_shows_command_and_allows_once() -> None:
         await pilot.pause()
 
         assert isinstance(app.screen, ApprovalScreen)
-        assert "uv run pytest" in str(app.screen.query_one("#approval-details").render())
+        assert "uv run pytest" in str(app.screen.query_one("#approval-details-text").render())
         await pilot.press("enter")
         await pilot.pause()
         await pilot.pause()
