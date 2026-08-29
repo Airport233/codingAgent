@@ -18,3 +18,7 @@ __pycache__/
 config.toml
 *.log
 .coding-agent/
+.agents/
+.claude/
+agent/
+skills-lock.json
