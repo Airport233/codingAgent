@@ -19,10 +19,12 @@ from coding_agent.providers.anthropic import AnthropicMessagesProvider
 from coding_agent.providers.base import Provider
 from coding_agent.providers.config import normalize_sdk_base_url
 from coding_agent.sessions.jsonl import JsonlSessionRepository, Redactor
+from coding_agent.skills import SkillLoader
 from coding_agent.tools.builtin import BuiltinToolSource
 from coding_agent.tools.catalog import ToolCatalog
 from coding_agent.tools.dispatcher import ToolDispatcher
 from coding_agent.tools.shell import ShellConfig, ShellRiskVerdict, classify_shell_command
+from coding_agent.tools.skills import SkillToolSource
 from coding_agent.tools.workspace import WorkspaceGuard
 
 _DEFAULT_GUARDED_TOOLS = frozenset({"shell", "write_file", "edit_file", "mkdir"})
@@ -318,6 +320,10 @@ async def create_runtime(
             return None
         return verdict.forced_action
 
+    skills = SkillLoader.default(
+        user_dir=settings.data_root / "skills",
+        project_dir=project_root / ".agents" / "skills",
+    ).load()
     catalog = await ToolCatalog.create(
         (
             BuiltinToolSource(
@@ -326,6 +332,7 @@ async def create_runtime(
                     mode=settings.approval_mode, shell_rules=settings.shell_rules
                 ),
             ),
+            SkillToolSource(skills),
         )
     )
     context_manager = ContextManager(
@@ -357,6 +364,7 @@ async def create_runtime(
         ),
         shell_classifier=classify_tool_call,
         guardian_enabled=settings.guardian_enabled,
+        skills=skills,
     )
     return AgentRuntime(application, store.session_id, client)
 

@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import sys
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
+from textual.containers import Vertical
 from textual.widgets import Collapsible, Label, OptionList
 
 import coding_agent.tui as tui_module
@@ -49,6 +51,8 @@ async def test_slash_help_uses_one_aligned_command_per_line() -> None:
         "  /help                    Show available commands",
         "  /model [provider/model]  Show or choose a model",
         "  /mode [auto|ask|deny]    Show or set approval mode",
+        "  /skills                  List available coding workflows",
+        "  /skill <name> <task>     Run a task with a coding workflow",
         "  /context                 Show context usage",
         "  /compact                 Compact conversation context",
         "  /thinking                Toggle thinking details",
@@ -153,6 +157,162 @@ async def test_mode_slash_command_shows_and_sets_approval_mode() -> None:
         await pilot.pause()
         assert application.approval_mode() == "deny"
         assert str(app.query_one("#status-mode", Label).render()) == "mode: deny"
+
+
+async def test_skills_command_lists_available_workflows() -> None:
+    app = CodingAgentTui(
+        application_with_response(),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer", PromptTextArea)
+        composer.value = "/skills"
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.press("enter")
+        await pilot.pause()
+        notice = str(app.query_one(".notice").render())
+        assert "Skills:" in notice or "No coding workflows" in notice
+
+
+async def test_skill_install_without_npx_reports_a_clear_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import shutil as _shutil
+
+    monkeypatch.setattr(_shutil, "which", lambda _cmd: None)
+    app = CodingAgentTui(
+        application_with_response(),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer", PromptTextArea)
+        composer.value = "/skill install owner/repo"
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+        notices = list(app.query(".notice"))
+        notice = str(notices[-1].render()) if notices else ""
+        assert "npx is not installed" in notice
+
+
+async def test_skill_uninstall_unknown_reports_not_found() -> None:
+    app = CodingAgentTui(
+        application_with_response(),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer", PromptTextArea)
+        composer.value = "/skill uninstall nonexistent"
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.press("enter")
+        await pilot.pause()
+        notice = str(app.query_one(".notice").render())
+        assert "not found" in notice
+
+
+async def test_skill_command_starts_a_turn_with_an_active_skill() -> None:
+    from coding_agent.skills import SkillLoader
+
+    skills = SkillLoader.default().load()
+    application = AgentApplication(
+        FakeProvider([AssistantExchange((TextBlock("done"),), "end_turn")]),
+        ToolDispatcher(ToolCatalog({})),
+        InMemorySessionStore(),
+        skills=skills,
+    )
+    app = CodingAgentTui(
+        application,
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer", PromptTextArea)
+        composer.value = "/skill test-fix fix the parser regression"
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        boundary = app.query(".skill-boundary")
+        assert len(boundary) >= 1
+        assert "test-fix" in str(boundary[0].render())
+        await pilot.pause()
+        await pilot.pause()
+
+
+async def test_skill_completion_popup_filters_available_skills() -> None:
+    from coding_agent.skills import SkillLoader
+
+    skills = SkillLoader.default().load()
+    application = AgentApplication(
+        FakeProvider([]),
+        ToolDispatcher(ToolCatalog({})),
+        InMemorySessionStore(),
+        skills=skills,
+    )
+    app = CodingAgentTui(
+        application,
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer", PromptTextArea)
+        composer.value = "/skill test"
+        await pilot.pause()
+        await pilot.pause()
+        popup = app.query_one("#completion-popup", Vertical)
+        assert popup.display is True
+        choices = app.query_one("#completion-options", OptionList)
+        ids = tuple(choices.get_option_at_index(i).id for i in range(choices.option_count))
+        assert "test-fix" in ids
+
+
+async def test_skill_uninstall_removes_an_existing_skill(tmp_path: Path) -> None:
+    skills_dir = tmp_path / ".agents" / "skills"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "demo").mkdir()
+    (skills_dir / "demo" / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Demo\n---\n\nBody.\n", encoding="utf-8"
+    )
+    app = CodingAgentTui(
+        application_with_response(),
+        model="provider/model",
+        workspace=str(tmp_path),
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        composer = app.query_one("#composer", PromptTextArea)
+        composer.value = "/skill uninstall demo"
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+        notices = list(app.query(".notice"))
+        notice = str(notices[-1].render()) if notices else ""
+        assert "Uninstalled skill: demo" in notice
+        assert not (skills_dir / "demo").exists()
 
 
 async def test_tui_composes_full_screen_workspace() -> None:

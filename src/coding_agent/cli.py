@@ -15,6 +15,7 @@ from coding_agent.events import (
     AgentCancelled,
     AgentCompleted,
     AgentFailed,
+    AgentStarted,
     ApprovalRequested,
     ContextUsageChanged,
     TextDelta,
@@ -32,6 +33,7 @@ from coding_agent.runtime import (
     create_runtime,
 )
 from coding_agent.sessions.jsonl import JsonlSessionRepository, SessionSummary
+from coding_agent.skills import format_skill_list
 from coding_agent.tui import CliTransition, CodingAgentTui, format_slash_help
 
 type TransitionCallback = Callable[[str | None], Awaitable[CliTransition]]
@@ -92,12 +94,14 @@ async def run_repl(
     available_models: tuple[str, ...] = (),
     switch_model: TransitionCallback | None = None,
     clear_session: TransitionCallback | None = None,
+    workspace: str = "",
 ) -> None:
     thinking_visible = False
     while True:
         prompt = (await read_input()).strip()
         if not prompt:
             continue
+        skill_name: str | None = None
         if prompt == "/exit":
             await application.close_session()
             return
@@ -118,6 +122,65 @@ async def run_repl(
                 continue
             write_output(f"Approval mode switched to {target}.\n")
             continue
+        if prompt == "/skills":
+            write_output(
+                format_skill_list(application.available_skills(), application.skill_warnings())
+                + "\n"
+            )
+            continue
+        if prompt == "/skill":
+            write_output(
+                "Usage: /skill <name> <task> | /skill install <source> | /skill uninstall <name>\n"
+            )
+            continue
+        if prompt.startswith("/skill install "):
+            source = prompt.removeprefix("/skill install ").strip()
+            if not source:
+                write_output("Usage: /skill install <owner/repo or url>\n")
+                continue
+            write_output(f"Installing skills from {source}...\n")
+            from platformdirs import user_data_path
+
+            from coding_agent.skills.installer import SkillInstaller
+
+            installer = SkillInstaller(
+                user_dir=user_data_path("codingAgent") / "skills",
+                project_dir=Path(workspace) / ".agents" / "skills",
+            )
+            result = await installer.install(source)
+            if result.installed:
+                new_skills = installer.reload()
+                application.reload_skills(new_skills)
+            write_output(result.message + "\n")
+            continue
+        if prompt.startswith("/skill uninstall "):
+            name = prompt.removeprefix("/skill uninstall ").strip()
+            if not name:
+                write_output("Usage: /skill uninstall <name>\n")
+                continue
+            from platformdirs import user_data_path
+
+            from coding_agent.skills.installer import SkillInstaller
+
+            installer = SkillInstaller(
+                user_dir=user_data_path("codingAgent") / "skills",
+                project_dir=Path(workspace) / ".agents" / "skills",
+            )
+            removed = await installer.uninstall(name)
+            if removed:
+                new_skills = installer.reload()
+                application.reload_skills(new_skills)
+                write_output(f"Uninstalled skill: {name}.\n")
+            else:
+                write_output(f"Skill not found: {name}.\n")
+            continue
+        if prompt.startswith("/skill "):
+            parts = prompt.split(maxsplit=2)
+            if len(parts) < 3 or not parts[2].strip():
+                write_output("Usage: /skill <name> <task>\n")
+                continue
+            skill_name = parts[1]
+            prompt = parts[2].strip()
         if prompt == "/model":
             choices = ", ".join(available_models) or model
             write_output(f"Model: {model}; available: {choices}\n")
@@ -208,8 +271,10 @@ async def run_repl(
         if prompt.startswith("/"):
             write_output(f"Unknown command: {prompt.split(maxsplit=1)[0]}. Use /help.\n")
             continue
-        async for event in application.run(prompt):
-            if isinstance(event, TextDelta):
+        async for event in application.run(prompt, skill_name=skill_name):
+            if isinstance(event, AgentStarted) and event.skill_name is not None:
+                write_output(f"[skill] {event.skill_name}\n")
+            elif isinstance(event, TextDelta):
                 write_output(event.text)
             elif isinstance(event, ThinkingStarted):
                 if thinking_visible:
@@ -377,6 +442,7 @@ async def _run_cli(
                 available_models=settings.available_models,
                 switch_model=switch_model,
                 clear_session=clear_session,
+                workspace=str(current_settings.workspace),
             )
             return
 

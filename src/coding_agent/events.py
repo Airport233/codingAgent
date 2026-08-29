@@ -6,6 +6,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True, slots=True)
 class AgentStarted:
     prompt: str
+    skill_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
