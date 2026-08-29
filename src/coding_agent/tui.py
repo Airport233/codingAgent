@@ -1163,7 +1163,7 @@ class CodingAgentTui(App[None]):
 
         return SkillInstaller(
             user_dir=user_data_path("codingAgent") / "skills",
-            project_dir=Path(self.workspace) / ".agents" / "skills",
+            project_dir=Path(self.workspace).expanduser() / ".agents" / "skills",
         )
 
     async def _install_skill(self, source: str) -> None:
