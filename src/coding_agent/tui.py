@@ -54,7 +54,7 @@ from coding_agent.events import (
 from coding_agent.runtime import RuntimeConfigurationError
 from coding_agent.sessions.jsonl import SessionSummary
 from coding_agent.skills import format_skill_list
-from coding_agent.skills.installer import InstallResult, SkillInstaller
+from coding_agent.skills.installer import SkillInstaller
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +215,32 @@ class CompactionProgress(Static):
         self.remove_class("running")
         self.add_class(kind)
         self.update(message)
+
+
+class InstallProgress(Static):
+    """Spinner shown while ``npx skills add`` runs."""
+
+    FRAMES = CompactionProgress.FRAMES
+
+    def __init__(self, label: str) -> None:
+        super().__init__("", markup=False, classes="message notice compaction-progress running")
+        self._label = label
+        self._started = time.monotonic()
+        self._frame = 0
+        self._timer: Timer | None = None
+
+    def on_mount(self) -> None:
+        self._tick()
+        self._timer = self.set_interval(0.15, self._tick)
+
+    def _tick(self) -> None:
+        elapsed = int(time.monotonic() - self._started)
+        self.update(f"{self.FRAMES[self._frame]} {self._label} {elapsed}s")
+        self._frame = (self._frame + 1) % len(self.FRAMES)
+
+    def stop(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
 
 
 class ResumeSessionScreen(Screen[str | None]):
@@ -1141,18 +1167,13 @@ class CodingAgentTui(App[None]):
         )
 
     async def _install_skill(self, source: str) -> None:
-        progress_label = f"Installing skills from {source}..."
-        progress = Static(progress_label, markup=False, classes="message notice info")
+        progress = InstallProgress(f"Installing skills from {source}…")
         await self._mount(progress)
+
         installer = self._make_installer()
-        result: InstallResult | None = None
-        async for item in installer.install(source):
-            if isinstance(item, tuple):
-                progress.update(f"{progress_label}\n{item[0]}")
-            else:
-                result = item
-        if result is None:
-            result = InstallResult((), "Install produced no result.")
+        result = await installer.install(source)
+
+        progress.stop()
         progress.remove()
         if result.installed:
             new_skills = installer.reload()

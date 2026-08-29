@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from coding_agent.skills.installer import InstallResult, SkillInstaller
+from coding_agent.skills.installer import SkillInstaller
 
 
 def _make_skill(directory: Path, name: str) -> None:
@@ -16,14 +16,6 @@ def _make_skill(directory: Path, name: str) -> None:
         f"---\nname: {name}\ndescription: Test skill {name}\n---\n\nBody for {name}.\n",
         encoding="utf-8",
     )
-
-
-async def _consume_install(installer: SkillInstaller, source: str) -> InstallResult | None:
-    result: InstallResult | None = None
-    async for item in installer.install(source):
-        if isinstance(item, InstallResult):
-            result = item
-    return result
 
 
 def test_uninstall_removes_a_skill_from_project_dir(tmp_path: Path) -> None:
@@ -75,8 +67,7 @@ def test_install_returns_error_without_npx(tmp_path: Path, monkeypatch: pytest.M
         project_dir=tmp_path / ".agents" / "skills",
     )
 
-    result = asyncio.run(_consume_install(installer, "owner/repo"))
-    assert result is not None
+    result = asyncio.run(installer.install("owner/repo"))
     assert result.installed == ()
     assert "npx is not installed" in result.message
 
@@ -84,7 +75,7 @@ def test_install_returns_error_without_npx(tmp_path: Path, monkeypatch: pytest.M
 def test_install_streams_output_and_detects_new_skills(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Mock npx to verify the streaming + detection logic without Node.js."""
+    """Mock npx to verify the output collection + detection logic."""
     project_dir = tmp_path / ".agents" / "skills"
     project_dir.mkdir(parents=True)
 
@@ -104,7 +95,6 @@ def test_install_streams_output_and_detects_new_skills(
             self.stdout = _FakeStream([b"Adding skill demo\n", b"Done\n"])
 
         async def wait(self) -> int:
-            # Simulate npx writing the skill directory before exiting
             _make_skill(self._project_dir, "demo")
             self.returncode = self._exit_code
             return self._exit_code
@@ -124,22 +114,7 @@ def test_install_streams_output_and_detects_new_skills(
         project_dir=project_dir,
     )
 
-    items = []
-    result = asyncio.run(_collect_all(installer, "owner/repo", items))
-    assert result is not None
+    result = asyncio.run(installer.install("owner/repo"))
     assert result.installed == ("demo",)
-    # Progress lines were streamed
-    assert len(items) >= 2
-    assert any("Adding skill" in line for line in items)
-
-
-async def _collect_all(
-    installer: SkillInstaller, source: str, lines: list[str]
-) -> InstallResult | None:
-    result: InstallResult | None = None
-    async for item in installer.install(source):
-        if isinstance(item, tuple):
-            lines.append(item[0])
-        else:
-            result = item
-    return result
+    assert len(result.output) >= 2
+    assert any("Adding skill" in line for line in result.output)

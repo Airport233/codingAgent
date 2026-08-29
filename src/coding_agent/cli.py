@@ -138,26 +138,20 @@ async def run_repl(
             if not source:
                 write_output("Usage: /skill install <owner/repo or url>\n")
                 continue
-            write_output(f"Installing skills from {source}...\n")
+            write_output(f"Installing skills from {source}… (this may take a minute)\n")
             from platformdirs import user_data_path
 
-            from coding_agent.skills.installer import InstallResult, SkillInstaller
+            from coding_agent.skills.installer import SkillInstaller
 
             installer = SkillInstaller(
                 user_dir=user_data_path("codingAgent") / "skills",
                 project_dir=Path(workspace) / ".agents" / "skills",
             )
-            result: InstallResult | None = None
-            async for item in installer.install(source):
-                if isinstance(item, tuple):
-                    write_output(f"  {item[0]}\n")
-                else:
-                    result = item
-            if result is not None and result.installed:
+            result = await installer.install(source)
+            if result.installed:
                 new_skills = installer.reload()
                 application.reload_skills(new_skills)
-            if result is not None:
-                write_output(result.message + "\n")
+            write_output(result.message + "\n")
             continue
         if prompt.startswith("/skill uninstall "):
             name = prompt.removeprefix("/skill uninstall ").strip()
