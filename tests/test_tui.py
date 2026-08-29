@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 from pydantic import BaseModel
-from textual.widgets import Collapsible, OptionList
+from textual.widgets import Collapsible, Label, OptionList
 
 import coding_agent.tui as tui_module
 from coding_agent.application import AgentApplication
@@ -66,7 +66,7 @@ def application_with_response(text: str = "Finished successfully.") -> AgentAppl
     )
 
 
-async def test_composer_shows_the_live_approval_mode_in_its_border_title() -> None:
+async def test_status_bar_shows_the_live_approval_mode_left_of_the_model_name() -> None:
     application = AgentApplication(
         FakeProvider([]),
         ToolDispatcher(ToolCatalog({})),
@@ -82,8 +82,11 @@ async def test_composer_shows_the_live_approval_mode_in_its_border_title() -> No
 
     async with app.run_test() as pilot:
         await pilot.pause()
-        composer = app.query_one("#composer", PromptTextArea)
-        assert composer.border_title == "mode: ask"
+        status_bar = app.query_one("#status-bar")
+        assert str(app.query_one("#status-mode", Label).render()) == "mode: ask"
+        assert list(status_bar.children).index(app.query_one("#status-mode")) < list(
+            status_bar.children
+        ).index(app.query_one("#status-model"))
 
 
 async def test_shift_tab_cycles_approval_mode_and_updates_the_indicator() -> None:
@@ -102,22 +105,22 @@ async def test_shift_tab_cycles_approval_mode_and_updates_the_indicator() -> Non
 
     async with app.run_test() as pilot:
         await pilot.pause()
-        composer = app.query_one("#composer", PromptTextArea)
-        assert composer.border_title == "mode: auto"
+        mode_label = app.query_one("#status-mode", Label)
+        assert str(mode_label.render()) == "mode: auto"
 
         await pilot.press("shift+tab")
         await pilot.pause()
-        assert composer.border_title == "mode: ask"
+        assert str(mode_label.render()) == "mode: ask"
         assert application.approval_mode() == "ask"
         assert "Approval mode switched to ask" in str(app.query_one(".notice").render())
 
         await pilot.press("shift+tab")
         await pilot.pause()
-        assert composer.border_title == "mode: deny"
+        assert str(mode_label.render()) == "mode: deny"
 
         await pilot.press("shift+tab")
         await pilot.pause()
-        assert composer.border_title == "mode: auto"
+        assert str(mode_label.render()) == "mode: auto"
 
 
 async def test_mode_slash_command_shows_and_sets_approval_mode() -> None:
@@ -149,7 +152,7 @@ async def test_mode_slash_command_shows_and_sets_approval_mode() -> None:
         await pilot.press("enter")
         await pilot.pause()
         assert application.approval_mode() == "deny"
-        assert app.query_one("#composer", PromptTextArea).border_title == "mode: deny"
+        assert str(app.query_one("#status-mode", Label).render()) == "mode: deny"
 
 
 async def test_tui_composes_full_screen_workspace() -> None:

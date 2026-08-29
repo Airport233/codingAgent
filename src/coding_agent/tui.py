@@ -392,6 +392,7 @@ class CodingAgentTui(App[None]):
         with VerticalScroll(id="conversation"):
             yield Static(self._welcome_text(), markup=False, id="brand")
         with Horizontal(id="status-bar"):
+            yield Label(self._mode_label(), id="status-mode")
             yield Label(self.model, id="status-model")
             yield Label(self.workspace, id="status-workspace")
             yield Label(self._context_label(), id="status-context")
@@ -1019,9 +1020,12 @@ class CodingAgentTui(App[None]):
         self._update_mode_indicator()
         await self._notice(f"Approval mode switched to {next_mode}.", "info")
 
-    def _update_mode_indicator(self) -> None:
+    def _mode_label(self) -> str:
         mode = self.application.approval_mode()
-        self.query_one("#composer", PromptTextArea).border_title = f"mode: {mode}" if mode else ""
+        return f"mode: {mode}" if mode else "mode: unavailable"
+
+    def _update_mode_indicator(self) -> None:
+        self.query_one("#status-mode", Label).update(self._mode_label())
 
     async def action_cancel_turn(self) -> None:
         if self._turn_worker is not None and self._turn_worker.is_running:
