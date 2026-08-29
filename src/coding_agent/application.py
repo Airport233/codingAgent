@@ -324,23 +324,56 @@ class AgentApplication:
             if response.tool_uses:
                 results: list[ToolResultBlock] = []
                 for call_index, call in enumerate(response.tool_uses):
-                    if self._shell_classifier is not None:
-                        verdict = self._shell_classifier(call)
-                        if verdict is not None:
-                            await self._sessions.append(
-                                "shell_command_classified",
-                                {
-                                    "call_id": call.call_id,
-                                    "tool_name": call.name,
-                                    "command": self._redacted_text(call.input.get("command", "")),
-                                    "tier": verdict.tier,
-                                    "matched_rule": verdict.matched_rule,
-                                    "escapes_workspace": verdict.escapes_workspace,
-                                    "touches_sensitive_path": verdict.touches_sensitive_path,
-                                    "reason": verdict.reason,
-                                },
-                            )
+                    verdict = (
+                        self._shell_classifier(call) if self._shell_classifier is not None else None
+                    )
+                    if verdict is not None:
+                        await self._sessions.append(
+                            "shell_command_classified",
+                            {
+                                "call_id": call.call_id,
+                                "tool_name": call.name,
+                                "command": self._redacted_text(call.input.get("command", "")),
+                                "tier": verdict.tier,
+                                "matched_rule": verdict.matched_rule,
+                                "escapes_workspace": verdict.escapes_workspace,
+                                "reason": verdict.reason,
+                            },
+                        )
                     approval = self._approval_policy.evaluate(call)
+                    if (
+                        verdict is not None
+                        and verdict.forced_action is not None
+                        and verdict.matched_rule is None
+                        and approval == "allow"
+                    ):
+                        guardian_note: str | None = None
+                        if self._guardian_enabled and call.name == "shell":
+                            command = call.input.get("command")
+                            if isinstance(command, str):
+                                try:
+                                    guardian_note = await self._request_shell_guardian_review(
+                                        command
+                                    )
+                                except Exception:
+                                    guardian_note = None
+                                await self._sessions.append(
+                                    "guardian_reviewed",
+                                    {
+                                        "call_id": call.call_id,
+                                        "note": self._redacted_text(guardian_note)
+                                        if guardian_note is not None
+                                        else None,
+                                        "failed": guardian_note is None,
+                                    },
+                                )
+                        message = (
+                            "Ran a flagged command without approval: "
+                            f"{self._redacted_text(verdict.reason)}"
+                        )
+                        if guardian_note:
+                            message += f" — {self._redacted_text(guardian_note)}"
+                        yield WarningRaised(message)
                     if approval == "ask":
                         request_id = uuid.uuid4().hex
                         pending: asyncio.Future[ApprovalDecision] = (

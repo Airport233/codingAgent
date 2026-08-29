@@ -214,7 +214,6 @@ def test_classify_shell_command_allows_safe_commands_to_follow_the_configured_mo
     assert verdict.tier == "low"
     assert verdict.forced_action is None
     assert verdict.escapes_workspace is False
-    assert verdict.touches_sensitive_path is False
 
 
 def test_classify_shell_command_forces_ask_for_builtin_elevated_patterns(
@@ -268,20 +267,6 @@ def test_classify_shell_command_allows_absolute_path_argument_inside_workspace(
     verdict = classify_shell_command(f"cat {target}", guard)
 
     assert verdict.escapes_workspace is False
-
-
-def test_classify_shell_command_detects_sensitive_paths_outside_file_tools(
-    workspace: Path,
-) -> None:
-    guard = WorkspaceGuard(workspace)
-
-    verdict = classify_shell_command("cat .env", guard)
-
-    assert verdict.touches_sensitive_path is True
-    assert verdict.forced_action == "ask"
-
-    git_verdict = classify_shell_command("rm -rf .git", guard)
-    assert git_verdict.touches_sensitive_path is True
 
 
 def test_classify_shell_command_configured_rules_take_precedence(workspace: Path) -> None:

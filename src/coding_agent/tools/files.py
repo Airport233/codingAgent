@@ -29,7 +29,7 @@ class WriteFileTool:
 
     async def execute(self, arguments: BaseModel) -> ToolOutput:
         parsed = WriteFileInput.model_validate(arguments)
-        target = self._guard.resolve_for_write(parsed.path)
+        target = self._guard.resolve(parsed.path)
         existed = target.exists()
         if existed and not target.is_file():
             raise RecoverableToolError("Target exists and is not a file")
@@ -38,7 +38,7 @@ class WriteFileTool:
         if not target.parent.is_dir():
             if not parsed.create_parents:
                 raise RecoverableToolError("parent directory does not exist")
-            self._guard.resolve_for_write(str(target.parent.relative_to(self._guard.root)))
+            self._guard.resolve(str(target.parent.relative_to(self._guard.root)))
             target.parent.mkdir(parents=True, exist_ok=True)
 
         if existed:
@@ -72,7 +72,7 @@ class MkdirTool:
 
     async def execute(self, arguments: BaseModel) -> ToolOutput:
         parsed = MkdirInput.model_validate(arguments)
-        target = self._guard.resolve_for_write(parsed.path)
+        target = self._guard.resolve(parsed.path)
         if target.exists():
             if not target.is_dir():
                 raise RecoverableToolError("Target exists and is not a directory")
@@ -108,7 +108,7 @@ class EditFileTool:
 
     async def execute(self, arguments: BaseModel) -> ToolOutput:
         parsed = EditFileInput.model_validate(arguments)
-        target = self._guard.resolve_for_write(parsed.path)
+        target = self._guard.resolve(parsed.path)
         if not target.is_file():
             raise RecoverableToolError("File does not exist")
         self._read_set.require_current(

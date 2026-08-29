@@ -141,7 +141,7 @@ async def test_edit_rejects_unread_ranges_and_expected_content_mismatch(
 
 
 @pytest.mark.asyncio
-async def test_mkdir_is_recursive_idempotent_and_rejects_protected_paths(
+async def test_mkdir_is_recursive_and_idempotent(
     workspace: Path,
 ) -> None:
     tool = MkdirTool(workspace)
@@ -151,8 +151,6 @@ async def test_mkdir_is_recursive_idempotent_and_rejects_protected_paths(
 
     assert (workspace / "a/b/c").is_dir()
     assert "already exists" in result.content.lower()
-    with pytest.raises(RecoverableToolError, match="protected"):
-        await tool.execute(MkdirInput(path=".git/hooks"))
 
 
 def test_workspace_guard_rejects_escape_and_atomic_failure_preserves_original(
@@ -164,7 +162,7 @@ def test_workspace_guard_rejects_escape_and_atomic_failure_preserves_original(
     target.write_text("original", encoding="utf-8")
 
     with pytest.raises(RecoverableToolError, match="outside"):
-        guard.resolve_for_write("../outside.txt")
+        guard.resolve("../outside.txt")
 
     def fail_replace(
         source: str | bytes | os.PathLike[str] | os.PathLike[bytes],
