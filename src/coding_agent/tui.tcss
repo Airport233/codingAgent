@@ -1,0 +1,207 @@
+Screen {
+    background: #0b0f14;
+    color: #d7dde5;
+    layout: vertical;
+}
+
+#brand {
+    height: auto;
+    padding: 1 2;
+    background: #111821;
+    color: #7dd3fc;
+    text-style: bold;
+    border-bottom: solid #243244;
+}
+
+#conversation {
+    height: 1fr;
+    padding: 1 2;
+    scrollbar-color: #334155;
+    scrollbar-background: #111821;
+}
+
+.message, .tool-card, .thinking-card {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+}
+
+.message {
+    padding: 1 2;
+}
+
+.user-message {
+    margin-left: 8;
+    background: #172554;
+    border-left: thick #60a5fa;
+}
+
+.assistant-message {
+    margin-right: 5;
+    background: #111821;
+    border-left: thick #34d399;
+}
+
+.notice {
+    background: #111821;
+    color: #94a3b8;
+}
+
+.notice.error, .failed {
+    border-left: thick #fb7185;
+}
+
+.notice.warning, .running {
+    border-left: thick #fbbf24;
+}
+
+.context-boundary {
+    color: #c4b5fd;
+    background: #17142b;
+    border-top: solid #7c3aed;
+    border-bottom: solid #7c3aed;
+    text-align: center;
+}
+
+.succeeded {
+    border-left: thick #34d399;
+}
+
+.tool-card, .thinking-card {
+    background: #0f1720;
+    border: round #334155;
+}
+
+.tool-body, .thinking-body {
+    padding: 0 1 1 1;
+    color: #b6c2d1;
+}
+
+#status-bar {
+    height: 3;
+    padding: 0 1;
+    background: #111821;
+    border-top: solid #243244;
+}
+
+#status-bar Label {
+    width: 1fr;
+    padding: 1;
+    color: #94a3b8;
+}
+
+#status-model {
+    color: #7dd3fc;
+}
+
+#completion-popup {
+    display: none;
+    height: auto;
+    max-height: 10;
+    margin: 0 1;
+    background: #111821;
+    border: round #3b82f6;
+}
+
+#completion-title {
+    height: 1;
+    padding: 0 1;
+    color: #7dd3fc;
+    text-style: bold;
+}
+
+#completion-options {
+    height: 1fr;
+    background: #111821;
+    border: none;
+}
+
+#composer {
+    height: 3;
+    min-height: 3;
+    max-height: 8;
+    margin: 0 1 1 1;
+    border: tall #3b82f6;
+    background: #111821;
+}
+
+#composer:focus {
+    border: tall #7dd3fc;
+}
+
+Footer {
+    background: #0b0f14;
+    color: #64748b;
+}
+
+ResumeSessionScreen {
+    background: #0b0f14;
+    color: #d7dde5;
+    layout: vertical;
+    padding: 1 2;
+}
+
+#resume-title {
+    height: 3;
+    padding: 1 1;
+    color: #7dd3fc;
+    text-style: bold;
+    border-bottom: solid #243244;
+}
+
+#resume-options {
+    height: 1fr;
+    margin-top: 1;
+    background: #111821;
+    border: round #334155;
+}
+
+#resume-preview {
+    height: 9;
+    padding: 1 2;
+    margin-top: 1;
+    background: #0f1720;
+    color: #b6c2d1;
+    border: round #334155;
+}
+
+#resume-help {
+    height: 2;
+    padding: 0 1;
+    color: #64748b;
+}
+
+ApprovalScreen {
+    background: #0b0f14;
+    color: #d7dde5;
+    layout: vertical;
+    padding: 2 4;
+}
+
+#approval-title {
+    height: 3;
+    padding: 1 2;
+    color: #fbbf24;
+    text-style: bold;
+    border-bottom: solid #854d0e;
+}
+
+#approval-details {
+    height: 1fr;
+    padding: 1 2;
+    background: #111821;
+    border: round #334155;
+}
+
+#approval-options {
+    height: 7;
+    margin-top: 1;
+    background: #111821;
+    border: round #fbbf24;
+}
+
+#approval-help {
+    height: 2;
+    padding: 0 1;
+    color: #94a3b8;
+}

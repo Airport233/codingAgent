@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+import coding_agent.sessions.jsonl as jsonl_module
 from coding_agent.domain import (
     AssistantExchange,
     RedactedThinkingBlock,
@@ -95,6 +97,9 @@ async def test_jsonl_round_trip_preserves_raw_blocks_usage_and_tool_metadata(
     assert recovered.conversation == (user, continuation, final)
     assert recovered.warnings == ()
     assert recovered.compaction == checkpoint
+    assert len(recovered.compactions) == 1
+    assert recovered.compactions[0].exchange_index == 3
+    assert recovered.compactions[0].payload == checkpoint
 
 
 @pytest.mark.asyncio
@@ -115,6 +120,127 @@ async def test_resume_latest_is_scoped_to_the_current_project(
     assert recovered is not None
     assert recovered.store.session_id == "latest"
     assert recovered.conversation == (UserExchange("latest"),)
+
+
+@pytest.mark.asyncio
+async def test_sessions_can_be_listed_and_resumed_by_id(
+    roots: tuple[Path, Path, Path],
+) -> None:
+    data_root, project, other_project = roots
+    repository = JsonlSessionRepository(data_root)
+    first = await repository.create(project, session_id="first")
+    await first.append("model_changed", {"previous": None, "current": "provider/model-a"})
+    await first.append("user_exchange", UserExchange("  First\nconversation   title  "))
+    await first.append("assistant_exchange", AssistantExchange((TextBlock("answer"),), "end_turn"))
+    await first.append(
+        "compaction_completed",
+        {
+            "reason": "manual",
+            "strategy": "deterministic",
+            "retained_from": 1,
+            "before_tokens": 100,
+            "after_tokens": 50,
+            "summary": "summary",
+        },
+    )
+    second = await repository.create(project, session_id="second")
+    await second.append("user_exchange", UserExchange("Second conversation"))
+    other = await repository.create(other_project, session_id="other")
+    await other.append("user_exchange", UserExchange("Must not be listed"))
+
+    tied_timestamp = "2026-08-29T00:00:00+00:00"
+    for store in (first, second):
+        events = [json.loads(line) for line in store.events_path.read_text().splitlines()]
+        for event in events:
+            event["timestamp"] = tied_timestamp
+        store.events_path.write_text(
+            "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
+        )
+
+    summaries = await repository.list_sessions(project)
+
+    assert [summary.session_id for summary in summaries] == ["second", "first"]
+    first_summary = summaries[1]
+    assert first_summary.title == "First conversation title"
+    assert first_summary.model == "provider/model-a"
+    assert first_summary.exchange_count == 2
+    assert first_summary.compacted is True
+    recovered = await repository.resume(project, "first")
+    assert recovered is not None
+    assert recovered.store.session_id == "first"
+    assert recovered.conversation[0] == UserExchange("  First\nconversation   title  ")
+    assert await repository.resume(project, "other") is None
+
+
+@pytest.mark.asyncio
+async def test_event_timestamps_remain_ordered_when_the_wall_clock_stalls(
+    roots: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_root, project, _ = roots
+    frozen = datetime(2026, 8, 29, tzinfo=UTC)
+    monkeypatch.setattr(jsonl_module, "_utc_now", lambda: frozen)
+    repository = JsonlSessionRepository(data_root)
+
+    store = await repository.create(project, session_id="ordered")
+    await store.append("user_exchange", UserExchange("first"))
+    await store.append("user_exchange", UserExchange("second"))
+
+    timestamps = [
+        json.loads(line)["timestamp"] for line in store.events_path.read_text().splitlines()
+    ]
+    assert timestamps == sorted(timestamps)
+    assert len(timestamps) == len(set(timestamps))
+
+
+@pytest.mark.asyncio
+async def test_deferred_session_is_not_persisted_until_meaningful_activity(
+    roots: tuple[Path, Path, Path],
+) -> None:
+    data_root, project, _ = roots
+    repository = JsonlSessionRepository(data_root)
+    untouched = repository.deferred_create(
+        project,
+        initial_events=(("model_changed", {"previous": None, "current": "model-a"}),),
+    )
+
+    await untouched.append("session_closed", {})
+
+    assert await repository.list_sessions(project) == ()
+    assert not (data_root / "sessions").exists()
+
+    active = repository.deferred_create(
+        project,
+        initial_events=(("model_changed", {"previous": None, "current": "model-a"}),),
+    )
+    await active.append("user_exchange", UserExchange("First real prompt"))
+
+    summaries = await repository.list_sessions(project)
+    assert len(summaries) == 1
+    assert summaries[0].session_id == active.session_id
+    assert summaries[0].title == "First real prompt"
+
+    legacy_empty = await repository.create(project, session_id="legacy-empty")
+    await legacy_empty.append("session_closed", {})
+    assert len(await repository.list_sessions(project)) == 1
+    latest = await repository.resume_latest(project)
+    assert latest is not None
+    assert latest.store.session_id == active.session_id
+
+
+@pytest.mark.asyncio
+async def test_starting_a_new_session_preserves_the_closed_session_file(
+    roots: tuple[Path, Path, Path],
+) -> None:
+    data_root, project, _ = roots
+    repository = JsonlSessionRepository(data_root)
+    previous = await repository.create(project, session_id="previous")
+    await previous.append("session_closed", {})
+
+    current = await repository.create(project, session_id="current")
+
+    assert previous.events_path.is_file()
+    assert current.events_path.is_file()
+    assert previous.events_path != current.events_path
 
 
 @pytest.mark.asyncio

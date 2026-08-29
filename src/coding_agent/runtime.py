@@ -5,12 +5,13 @@ import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from anthropic import AsyncAnthropic
 from platformdirs import user_config_path, user_data_path
 
 from coding_agent.application import AgentApplication
+from coding_agent.approval import ApprovalMode, ConfigurableApprovalPolicy
 from coding_agent.context import ContextBudget, ContextManager, TokenEstimator
 from coding_agent.memory.loader import ProjectMemoryLoader
 from coding_agent.providers.anthropic import AnthropicMessagesProvider
@@ -20,6 +21,7 @@ from coding_agent.sessions.jsonl import JsonlSessionRepository, Redactor
 from coding_agent.tools.builtin import BuiltinToolSource
 from coding_agent.tools.catalog import ToolCatalog
 from coding_agent.tools.dispatcher import ToolDispatcher
+from coding_agent.tools.shell import ShellConfig
 
 
 class RuntimeConfigurationError(ValueError):
@@ -34,10 +36,20 @@ class RuntimeSettings:
     model_key: str
     base_url: str = field(repr=False)
     api_key: str = field(repr=False)
+    available_models: tuple[str, ...] = ()
     max_tokens: int = 4096
     max_steps: int = 20
     context_window: int = 200_000
     auto_compact_ratio: float = 0.8
+    provider_extra_body: dict[str, object] = field(default_factory=dict, repr=False)
+    supports_tools: bool = True
+    auth_mode: str = "x-api-key"
+    approval_mode: ApprovalMode = "auto"
+    max_tokens_override: int | None = field(default=None, repr=False)
+    max_steps_override: int | None = field(default=None, repr=False)
+    context_window_override: int | None = field(default=None, repr=False)
+    auto_compact_ratio_override: float | None = field(default=None, repr=False)
+    approval_mode_override: ApprovalMode | None = field(default=None, repr=False)
 
     @classmethod
     def from_environment(
@@ -51,6 +63,7 @@ class RuntimeSettings:
         max_steps: int | None = None,
         context_window: int | None = None,
         auto_compact_ratio: float | None = None,
+        approval_mode: str | None = None,
     ) -> RuntimeSettings:
         return cls.load(
             workspace=workspace,
@@ -62,6 +75,7 @@ class RuntimeSettings:
             max_steps=max_steps,
             context_window=context_window,
             auto_compact_ratio=auto_compact_ratio,
+            approval_mode=approval_mode,
         )
 
     @classmethod
@@ -77,6 +91,7 @@ class RuntimeSettings:
         max_steps: int | None = None,
         context_window: int | None = None,
         auto_compact_ratio: float | None = None,
+        approval_mode: str | None = None,
     ) -> RuntimeSettings:
         values = os.environ if environ is None else environ
         config = _read_config(config_path or user_config_path("codingAgent") / "config.toml")
@@ -91,6 +106,7 @@ class RuntimeSettings:
 
         provider = _select_provider(config, selected_model)
         model_id = selected_model.split("/", 1)[-1]
+        model_key = _canonical_model_key(config, selected_model)
         model_config = _select_model_config(provider, model_id)
         resolved_max_tokens = _configured_int(
             max_tokens, model_config.get("max_output_tokens"), 4096, "max output tokens"
@@ -107,6 +123,17 @@ class RuntimeSettings:
             0.8,
             "auto compaction ratio",
         )
+        approval_mode_value = (
+            approval_mode
+            or values.get("CODING_AGENT_APPROVAL_MODE")
+            or general.get("approval_mode", "auto")
+        )
+        if approval_mode_value not in {"auto", "ask", "deny"}:
+            raise RuntimeConfigurationError("Approval mode must be auto, ask, or deny")
+        provider_extra_body = _thinking_options(model_config, resolved_max_tokens)
+        supports_tools = _configured_bool(
+            model_config.get("supports_tools"), True, "supports tools"
+        )
         configured_url = values.get("CODING_AGENT_BASE_URL") or provider.get("base_url")
         if not isinstance(configured_url, str) or not configured_url.strip():
             raise RuntimeConfigurationError("Missing Provider Base URL")
@@ -118,6 +145,9 @@ class RuntimeSettings:
             raise RuntimeConfigurationError(
                 "Missing API key environment variable: CODING_AGENT_API_KEY"
             )
+        auth_mode = provider.get("auth_mode", "x-api-key")
+        if not isinstance(auth_mode, str) or auth_mode not in {"x-api-key", "bearer"}:
+            raise RuntimeConfigurationError("Provider auth_mode must be x-api-key or bearer")
         if (
             resolved_max_tokens <= 0
             or resolved_max_steps <= 0
@@ -138,13 +168,25 @@ class RuntimeSettings:
             workspace=resolved_workspace,
             data_root=selected_data_root,
             model=model_id,
-            model_key=selected_model,
+            model_key=model_key,
             base_url=configured_url.strip(),
             api_key=credential,
+            available_models=_available_model_keys(config, model_key),
             max_tokens=resolved_max_tokens,
             max_steps=resolved_max_steps,
             context_window=resolved_context_window,
             auto_compact_ratio=resolved_auto_ratio,
+            provider_extra_body=provider_extra_body,
+            supports_tools=supports_tools,
+            auth_mode=auth_mode,
+            approval_mode=cast(ApprovalMode, approval_mode_value),
+            max_tokens_override=max_tokens,
+            max_steps_override=max_steps,
+            context_window_override=context_window,
+            auto_compact_ratio_override=auto_compact_ratio,
+            approval_mode_override=(
+                cast(ApprovalMode, approval_mode) if approval_mode is not None else None
+            ),
         )
 
     @property
@@ -173,18 +215,30 @@ async def create_runtime(
     settings: RuntimeSettings,
     *,
     resume: bool = False,
+    resume_session_id: str | None = None,
     provider: Provider | None = None,
 ) -> AgentRuntime:
     project_root = discover_project_root(settings.workspace)
+    workspace_root = settings.workspace.resolve()
+    redactor = Redactor((settings.api_key, settings.base_url, settings.sdk_base_url))
     sessions = JsonlSessionRepository(
         settings.data_root,
-        redactor=Redactor((settings.api_key, settings.base_url, settings.sdk_base_url)),
+        redactor=redactor,
     )
-    recovered = await sessions.resume_latest(project_root) if resume else None
-    if resume and recovered is None:
+    recovered = (
+        await sessions.resume(workspace_root, resume_session_id)
+        if resume_session_id is not None
+        else await sessions.resume_latest(workspace_root)
+        if resume
+        else None
+    )
+    if (resume or resume_session_id is not None) and recovered is None:
         raise RuntimeConfigurationError("No session exists for this project")
     if recovered is None:
-        store = await sessions.create(project_root)
+        store = sessions.deferred_create(
+            workspace_root,
+            initial_events=(("model_changed", {"previous": None, "current": settings.model_key}),),
+        )
         initial_exchanges = ()
     else:
         store = recovered.store
@@ -201,7 +255,7 @@ async def create_runtime(
         if recovered is not None
         else frozenset()
     )
-    if previous_model != settings.model_key:
+    if recovered is not None and previous_model != settings.model_key:
         await store.append(
             "model_changed",
             {"previous": previous_model, "current": settings.model_key},
@@ -212,18 +266,25 @@ async def create_runtime(
     if selected_provider is None:
         credential = settings.api_key
         client_options: dict[str, Any] = {
-            "api_key": credential,
             "base_url": settings.sdk_base_url,
             "max_retries": 2,
         }
+        if settings.auth_mode == "bearer":
+            client_options["auth_token"] = credential
+        else:
+            client_options["api_key"] = credential
         client = AsyncAnthropic(**client_options)
         selected_provider = AnthropicMessagesProvider(
             client=client,
             model=settings.model,
             max_tokens=settings.max_tokens,
+            extra_body=settings.provider_extra_body,
+            supports_tools=settings.supports_tools,
         )
 
-    catalog = await ToolCatalog.create((BuiltinToolSource(project_root),))
+    catalog = await ToolCatalog.create(
+        (BuiltinToolSource(workspace_root, shell_config=ShellConfig(mode=settings.approval_mode)),)
+    )
     context_manager = ContextManager(
         ContextBudget(
             context_window=settings.context_window,
@@ -244,6 +305,12 @@ async def create_runtime(
         initial_exchanges=initial_exchanges,
         context_manager=context_manager,
         context_reprojected=model_changed,
+        display_redactor=redactor.redact,
+        initial_compactions=recovered.compactions if recovered is not None else (),
+        approval_policy=ConfigurableApprovalPolicy(
+            mode=settings.approval_mode,
+            guarded_tools=frozenset({"shell"}),
+        ),
     )
     return AgentRuntime(application, store.session_id, client)
 
@@ -286,11 +353,35 @@ def _select_provider(config: Mapping[str, object], model: str) -> dict[str, obje
     return {}
 
 
+def _canonical_model_key(config: Mapping[str, object], model: str) -> str:
+    if "/" in model:
+        return model
+    providers = _mapping(config.get("providers"))
+    matches = [
+        name
+        for name, value in providers.items()
+        if model in _model_names(_mapping(value).get("models"))
+    ]
+    if len(matches) == 1:
+        return f"{matches[0]}/{model}"
+    if len(providers) == 1:
+        return f"{next(iter(providers))}/{model}"
+    return f"default/{model}"
+
+
 def _select_model_config(provider: Mapping[str, object], model_id: str) -> dict[str, object]:
     models = provider.get("models")
     if not isinstance(models, Mapping):
         return {}
     return _mapping(models.get(model_id))
+
+
+def _available_model_keys(config: Mapping[str, object], selected_model: str) -> tuple[str, ...]:
+    configured = []
+    for provider_name, raw_provider in _mapping(config.get("providers")).items():
+        for model_name in _model_names(_mapping(raw_provider).get("models")):
+            configured.append(f"{provider_name}/{model_name}")
+    return tuple(dict.fromkeys((*configured, selected_model)))
 
 
 def _configured_int(explicit: int | None, configured: object, default: int, label: str) -> int:
@@ -307,6 +398,32 @@ def _configured_float(
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise RuntimeConfigurationError(f"Configured {label} has an invalid type")
     return float(value)
+
+
+def _configured_bool(configured: object, default: bool, label: str) -> bool:
+    value = default if configured is None else configured
+    if not isinstance(value, bool):
+        raise RuntimeConfigurationError(f"Configured {label} has an invalid type")
+    return value
+
+
+def _thinking_options(model: Mapping[str, object], max_tokens: int) -> dict[str, object]:
+    mode = model.get("thinking_mode", "disabled")
+    if mode == "disabled":
+        return {}
+    if mode == "effort":
+        effort = model.get("thinking_effort", "high")
+        if effort not in {"low", "medium", "high"}:
+            raise RuntimeConfigurationError("Configured thinking effort is invalid")
+        return {"output_config": {"effort": effort}}
+    if mode == "enabled_budget":
+        budget = model.get("thinking_budget")
+        if isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0:
+            raise RuntimeConfigurationError("Configured thinking budget is invalid")
+        if budget >= max_tokens:
+            raise RuntimeConfigurationError("Thinking budget must be lower than max output tokens")
+        return {"thinking": {"type": "enabled", "budget_tokens": budget}}
+    raise RuntimeConfigurationError("Configured thinking mode is invalid")
 
 
 def _mapping(value: object) -> dict[str, object]:

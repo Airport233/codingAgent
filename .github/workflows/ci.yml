@@ -27,7 +27,14 @@ jobs:
       - run: uv run ruff format --check src tests scripts
       - run: uv run ruff check src tests scripts
       - run: uv run pyright
-      - run: uv run pytest --cov=coding_agent --cov-branch --cov-report=term-missing --cov-report=json:coverage.json --cov-report=xml:coverage.xml
+      - name: Run pytest
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run pytest --cov=coding_agent --cov-branch --cov-report=term-missing --cov-report=json:coverage.json --cov-report=xml:coverage.xml --junitxml=pytest-results.xml 2>&1 | tee pytest-output.txt
+      - name: Report pytest failures
+        if: failure()
+        run: uv run python scripts/report_pytest_failures.py pytest-results.xml --log pytest-output.txt
       - run: uv run python scripts/check_coverage.py coverage.json
       - run: uv run python scripts/check_secrets.py src tests scripts docs examples .github config.example.toml pyproject.toml README.md
       - run: uv run coding-agent --help

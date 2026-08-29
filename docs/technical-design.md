@@ -14,8 +14,8 @@
 | 模型 SDK | Anthropic 官方 Python SDK | Anthropic Messages HTTP/SSE 通信 | 允许使用厂商客户端库；只使用底层 Messages/stream 接口 |
 | 数据校验 | Pydantic 2 | 配置、工具参数、内部边界对象 | 能生成 JSON Schema，并提供清晰校验错误 |
 | CLI 参数 | Typer | 启动参数和非交互命令 | 类型化命令定义，帮助信息清晰 |
-| 交互输入 | prompt_toolkit | 多行输入、历史、快捷键 | 适合终端滚动式交互，不强制全屏 TUI |
-| 终端渲染 | Rich | Markdown、颜色、工具状态、差异和进度 | Windows Terminal 与 macOS 终端兼容 |
+| 全屏 TUI | Textual | 会话滚动、布局、输入、键盘事件和 TCSS 样式 | Python 原生、可测试，兼容 Windows Terminal 与 macOS 终端 |
+| 非交互渲染 | Rich | `--prompt` 模式和启动错误输出 | 适合 stdout 管道、日志和视频验收 |
 | 用户目录 | platformdirs | 配置、数据、缓存和日志路径 | 避免手写平台路径分支 |
 | 测试 | pytest + pytest-asyncio | 单元、异步和集成测试 | 支持 TDD 与异步 Agent 流程 |
 | 代码质量 | Ruff + Pyright | 格式、Lint、静态类型检查 | 反馈快，适合 CI |
@@ -213,12 +213,17 @@ MVP 不实现 MCP 传输，也不开放 MCP 端口。工具目录使用 `ToolSou
 
 ### 7.1 交互形态
 
-首版采用终端滚动式 CLI，不使用全屏 alternate screen：
+默认交互模式使用 Textual 的全屏 alternate screen：
 
 - Typer 解析启动参数；
-- prompt_toolkit 提供多行输入、历史和快捷键；
-- Rich 渲染 Markdown、状态、工具调用和错误；
-- 核心事件通过异步队列交给 CLI 渲染器。
+- Textual 提供可滚动会话区、可自动增高并软换行的多行输入区、状态栏、键盘事件和 TCSS 样式；
+- thinking 和工具详情使用可折叠组件，运行状态与结果在同一组件内更新；
+- 会话与输入文本支持选择和复制；空闲时 `Ctrl+C`/`Command+C` 复制选区并在 macOS 回退到 `pbcopy`，任务运行时仍优先取消；
+- 输入为空时 `↑/↓` 浏览当前运行期间的用户消息历史；输入非空时分别移动到全文开头和末尾；
+- 每段模型文本在事件时间线中独立挂载，保证文字、工具调用和工具结果严格按发生顺序显示；
+- `/` 命令与 `/model` 模型选择使用同一个单活动选择窗状态机；输入变化实时过滤，`↑/↓` 移动选择，`Tab` 补全，`Enter` 确认，`Esc` 仅关闭当前选择窗；
+- 核心事件由 TUI 异步 worker 消费，不阻塞输入与取消事件；
+- `--prompt` 保留 Rich/stdout 非交互适配器，不启动全屏界面。
 
 CLI 不解析 Provider 协议、不执行工具、不修改会话数据。它只提交用户命令并消费核心事件。
 
@@ -298,12 +303,15 @@ expected_file_hash
 
 - 精确值优先使用 Provider 返回的 usage。
 - 请求前用本地估算器计算文本、工具 schema 和历史压力。
+- 状态栏显示的是“下一次请求的有效上下文估算”，用 `~` 标识；Provider 返回的上次输入 token 另行显示为 exact，不混用两种口径。
 - 估算器分别统计 ASCII、CJK、JSON 和内容块开销，再用实际 usage 更新每个 Provider/模型的校准系数。
 - 不使用 tiktoken 假装精确计算 DeepSeek 或内部模型 token。
 - 自动压缩阈值和硬保护阈值按模型配置。
 - Provider 报上下文超限时，执行一次强制压缩并最多重试一次。
 
 压缩不得依赖百炼或 Anthropic 的服务端上下文管理功能。
+
+压缩 checkpoint 在本地以独立状态管理：JSONL 继续保留原始会话，模型请求则投影为“明确标识的历史摘要 + 未压缩的近期 exchange”。摘要标记同时说明其只是背景，不是新的用户指令。
 
 ## 11. 会话存储技术方案
 
@@ -322,7 +330,7 @@ expected_file_hash
 - 单元测试：纯函数、模型、状态机和错误分类。
 - 集成测试：使用 FakeProvider 串起 Agent 循环与真实临时文件工具。
 - 契约测试：用户显式运行，访问百炼或公司端点；默认 CI 不运行。
-- CLI 测试：输入命令、取消和事件渲染的最小行为，不做脆弱的全屏快照。
+- CLI 测试：使用 Textual pilot 验证布局、输入、事件渲染、折叠和取消；不做依赖终端尺寸和色值的脆弱全屏快照。
 
 ### 12.2 P0 测试清单
 
@@ -398,6 +406,18 @@ feature/cli-hardening
 - 不复制与项目规模不相称的 Provider、插件、MCP、多 Agent 或沙箱体系；MCP 在 MVP 中仅保留工具来源扩展边界。
 - 引用具体实现时使用固定 commit 链接，并检查许可证。
 - Anthropic 协议字段以 Anthropic/百炼官方文档、SDK 源码和 Provider 探测结果为准。
+
+本项目的命令选择交互参考以下固定版本，仅借鉴状态与按键语义，未复制实现代码：
+
+- Codex `94311d447587411789533c47601fd8bc9d81eb48`：[`command_popup.rs`](https://github.com/openai/codex/blob/94311d447587411789533c47601fd8bc9d81eb48/codex-rs/tui/src/bottom_pane/command_popup.rs) 与 [`slash_input.rs`](https://github.com/openai/codex/blob/94311d447587411789533c47601fd8bc9d81eb48/codex-rs/tui/src/bottom_pane/chat_composer/slash_input.rs)，Apache-2.0；
+- OpenCode `755ebdb94ee755a9d5691e47af2c16f56696996e`：[`slash-popover.tsx`](https://github.com/anomalyco/opencode/blob/755ebdb94ee755a9d5691e47af2c16f56696996e/packages/app/src/components/prompt-input/slash-popover.tsx) 与 [`use-composer-commands.tsx`](https://github.com/anomalyco/opencode/blob/755ebdb94ee755a9d5691e47af2c16f56696996e/packages/app/src/pages/session/use-composer-commands.tsx)，MIT。
+
+本项目的输入历史浏览交互参考以下固定版本，仅借鉴“未修改的召回内容可继续浏览”的状态语义，未复制实现代码：
+
+- Codex `94311d447587411789533c47601fd8bc9d81eb48`：[`chat_composer_history.rs`](https://github.com/openai/codex/blob/94311d447587411789533c47601fd8bc9d81eb48/codex-rs/tui/src/bottom_pane/chat_composer_history.rs)，Apache-2.0；
+- OpenCode `755ebdb94ee755a9d5691e47af2c16f56696996e`：[`history.ts`](https://github.com/anomalyco/opencode/blob/755ebdb94ee755a9d5691e47af2c16f56696996e/packages/app/src/components/prompt-input/history.ts)，MIT。
+
+本项目的压缩 checkpoint 语义和 usage 口径参考 OpenCode `755ebdb94ee755a9d5691e47af2c16f56696996e` 的 [`compaction.ts`](https://github.com/anomalyco/opencode/blob/755ebdb94ee755a9d5691e47af2c16f56696996e/packages/core/src/session/compaction.ts)、[`to-llm-message.ts`](https://github.com/anomalyco/opencode/blob/755ebdb94ee755a9d5691e47af2c16f56696996e/packages/core/src/session/runner/to-llm-message.ts) 和 [`session-context-metrics.ts`](https://github.com/anomalyco/opencode/blob/755ebdb94ee755a9d5691e47af2c16f56696996e/packages/app/src/components/session/session-context-metrics.ts)，MIT。仅借鉴“原始历史/有效投影分离”、“checkpoint 显式标记”和“估算/精确 usage 分口径”的设计原则，本项目仍使用自行实现的 Python 状态机和数据结构。
 
 ## 15. 技术完成标准
 

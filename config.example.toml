@@ -1,11 +1,16 @@
 [general]
 default_model = "example/example-model"
+approval_mode = "ask"
 
 [providers.example]
 protocol = "anthropic-messages"
 base_url = "https://example.invalid/anthropic"
 api_key_env = "CODING_AGENT_EXAMPLE_API_KEY"
+auth_mode = "x-api-key"
 
 [providers.example.models.example-model]
 context_window = 131072
 max_output_tokens = 8192
+supports_tools = true
+thinking_mode = "effort"
+thinking_effort = "high"

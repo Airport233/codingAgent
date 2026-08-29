@@ -15,10 +15,10 @@ from typing import Any, Literal, Protocol, cast
 
 from pydantic import BaseModel, Field
 
+from coding_agent.approval import ApprovalMode
 from coding_agent.tools.base import RecoverableToolError, ToolOutput
 from coding_agent.tools.workspace import WorkspaceGuard
 
-ApprovalMode = Literal["auto", "ask", "deny"]
 RiskLevel = Literal["low", "elevated"]
 
 

@@ -30,6 +30,15 @@ async def test_read_file_supports_inclusive_line_ranges(workspace: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_read_file_describes_an_empty_file(workspace: Path) -> None:
+    (workspace / "empty.txt").write_text("", encoding="utf-8")
+
+    result = await ReadFileTool(workspace).execute(ReadFileInput(path="empty.txt"))
+
+    assert result.content == "(file is empty)"
+
+
+@pytest.mark.asyncio
 async def test_read_file_rejects_binary_and_oversized_content(workspace: Path) -> None:
     (workspace / "binary.bin").write_bytes(b"text\x00binary")
     (workspace / "large.txt").write_text("123456789", encoding="utf-8")
@@ -72,6 +81,17 @@ async def test_code_search_supports_regular_expressions(workspace: Path) -> None
     result = await tool.execute(CodeSearchInput(query=r"value_\d+$", regex=True, max_results=10))
 
     assert result.content.splitlines() == ["main.py:1:value_1", "main.py:3:value_22"]
+
+
+@pytest.mark.asyncio
+async def test_code_search_describes_no_matches(workspace: Path) -> None:
+    (workspace / "main.py").write_text("nothing here\n", encoding="utf-8")
+
+    result = await CodeSearchTool(workspace, rg_executable=None).execute(
+        CodeSearchInput(query="missing")
+    )
+
+    assert result.content == "No matches."
 
 
 @pytest.mark.asyncio

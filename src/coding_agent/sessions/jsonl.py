@@ -5,15 +5,17 @@ import hashlib
 import json
 import os
 import re
+import threading
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
 from coding_agent.domain import (
     AssistantExchange,
+    CompactionRecord,
     ContentBlock,
     ConversationExchange,
     RedactedThinkingBlock,
@@ -29,6 +31,22 @@ from coding_agent.domain import (
 
 _SCHEMA_VERSION = 1
 _SESSION_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+_TIMESTAMP_LOCK = threading.Lock()
+_LAST_EVENT_TIMESTAMP: datetime | None = None
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _next_event_timestamp() -> str:
+    global _LAST_EVENT_TIMESTAMP
+    with _TIMESTAMP_LOCK:
+        current = _utc_now()
+        if _LAST_EVENT_TIMESTAMP is not None and current <= _LAST_EVENT_TIMESTAMP:
+            current = _LAST_EVENT_TIMESTAMP + timedelta(microseconds=1)
+        _LAST_EVENT_TIMESTAMP = current
+    return current.isoformat()
 
 
 class SessionCorruptError(Exception):
@@ -93,6 +111,18 @@ class RecoveredSession:
     compaction: dict[str, object] | None = None
     model: str | None = None
     conversation_models: tuple[str | None, ...] = ()
+    compactions: tuple[CompactionRecord, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SessionSummary:
+    session_id: str
+    title: str
+    created_at: str
+    updated_at: str
+    model: str | None
+    exchange_count: int
+    compacted: bool
 
 
 class JsonlSessionStore:
@@ -120,7 +150,7 @@ class JsonlSessionStore:
                 "event_id": str(uuid.uuid4()),
                 "session_id": self.session_id,
                 "sequence": sequence,
-                "timestamp": datetime.now(UTC).isoformat(),
+                "timestamp": _next_event_timestamp(),
                 "kind": kind,
                 "payload": redacted_payload,
             }
@@ -131,6 +161,40 @@ class JsonlSessionStore:
                 stream.flush()
                 os.fsync(stream.fileno())
             self._sequence = sequence
+
+
+class DeferredJsonlSessionStore:
+    """Create the durable session only when the first meaningful event is appended."""
+
+    def __init__(
+        self,
+        repository: JsonlSessionRepository,
+        project_root: Path,
+        session_id: str,
+        initial_events: Sequence[tuple[str, object]] = (),
+    ) -> None:
+        self.session_id = session_id
+        self._repository = repository
+        self._project_root = project_root
+        self._initial_events = tuple(initial_events)
+        self._store: JsonlSessionStore | None = None
+        self._lock = asyncio.Lock()
+
+    @property
+    def started(self) -> bool:
+        return self._store is not None
+
+    async def append(self, kind: str, payload: object) -> None:
+        async with self._lock:
+            if self._store is None:
+                if kind == "session_closed":
+                    return
+                self._store = await self._repository.create(
+                    self._project_root, session_id=self.session_id
+                )
+                for initial_kind, initial_payload in self._initial_events:
+                    await self._store.append(initial_kind, initial_payload)
+            await self._store.append(kind, payload)
 
 
 class JsonlSessionRepository:
@@ -152,6 +216,19 @@ class JsonlSessionRepository:
         await store.append("session_started", {"project_key": project_key})
         return store
 
+    def deferred_create(
+        self,
+        project_root: Path,
+        *,
+        initial_events: Sequence[tuple[str, object]] = (),
+    ) -> DeferredJsonlSessionStore:
+        return DeferredJsonlSessionStore(
+            self,
+            project_root,
+            uuid.uuid4().hex,
+            initial_events,
+        )
+
     async def resume_latest(self, project_root: Path) -> RecoveredSession | None:
         directory = self._sessions_root / _project_key(project_root)
         if not directory.is_dir():
@@ -159,7 +236,68 @@ class JsonlSessionRepository:
         candidates = tuple(directory.glob("*.jsonl"))
         if not candidates:
             return None
-        latest = max(candidates, key=lambda path: (path.stat().st_mtime_ns, path.name))
+        newest_first = sorted(
+            candidates,
+            key=lambda path: (path.stat().st_mtime_ns, path.name),
+            reverse=True,
+        )
+        for candidate in newest_first:
+            recovered = await self._resume_path(candidate)
+            if recovered.conversation:
+                return recovered
+        return None
+
+    async def resume(self, project_root: Path, session_id: str) -> RecoveredSession | None:
+        if not _SESSION_ID.fullmatch(session_id):
+            raise ValueError("session_id contains unsupported characters")
+        path = self._sessions_root / _project_key(project_root) / f"{session_id}.jsonl"
+        if not path.is_file():
+            return None
+        return await self._resume_path(path)
+
+    async def list_sessions(self, project_root: Path) -> tuple[SessionSummary, ...]:
+        directory = self._sessions_root / _project_key(project_root)
+        if not directory.is_dir():
+            return ()
+        summaries: list[SessionSummary] = []
+        for path in directory.glob("*.jsonl"):
+            try:
+                events, _warnings = _read_events(path, repair_incomplete=False)
+                if not events:
+                    continue
+                conversation, _, _, _, compaction, model, _ = _replay(events)
+            except SessionCorruptError:
+                continue
+            if not conversation:
+                continue
+            first_prompt = next(
+                (
+                    " ".join(exchange.content.split())
+                    for exchange in conversation
+                    if isinstance(exchange, UserExchange) and exchange.content.strip()
+                ),
+                "Untitled session",
+            )
+            summaries.append(
+                SessionSummary(
+                    session_id=events[0].session_id,
+                    title=_truncate_title(first_prompt),
+                    created_at=events[0].timestamp,
+                    updated_at=events[-1].timestamp,
+                    model=model,
+                    exchange_count=len(conversation),
+                    compacted=compaction is not None,
+                )
+            )
+        return tuple(
+            sorted(
+                summaries,
+                key=lambda item: (item.updated_at, item.created_at, item.session_id),
+                reverse=True,
+            )
+        )
+
+    async def _resume_path(self, latest: Path) -> RecoveredSession:
         events, warnings = _read_events(latest)
         if not events:
             raise SessionCorruptError("Session has no complete records")
@@ -169,9 +307,15 @@ class JsonlSessionRepository:
             sequence=events[-1].sequence,
             redactor=self._redactor,
         )
-        conversation, conversation_models, unfinished, pending_model, compaction, model = _replay(
-            events
-        )
+        (
+            conversation,
+            conversation_models,
+            unfinished,
+            pending_model,
+            compaction,
+            model,
+            compactions,
+        ) = _replay(events)
         if unfinished is not None:
             repair = ToolContinuationExchange(
                 assistant=unfinished,
@@ -195,6 +339,7 @@ class JsonlSessionRepository:
             compaction,
             model,
             tuple(conversation_models),
+            tuple(compactions),
         )
 
 
@@ -205,7 +350,9 @@ def _project_key(project_root: Path) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
 
 
-def _read_events(path: Path) -> tuple[list[SessionEvent], list[str]]:
+def _read_events(
+    path: Path, *, repair_incomplete: bool = True
+) -> tuple[list[SessionEvent], list[str]]:
     raw = path.read_bytes()
     lines = raw.splitlines(keepends=True)
     events: list[SessionEvent] = []
@@ -219,13 +366,20 @@ def _read_events(path: Path) -> tuple[list[SessionEvent], list[str]]:
             if not is_incomplete_tail:
                 raise SessionCorruptError(f"Invalid JSON at line {index}") from error
             warnings.append("Skipped an incomplete final session record")
-            _truncate_file(path, valid_bytes)
+            if repair_incomplete:
+                _truncate_file(path, valid_bytes)
             break
         event = _decode_event(decoded, line_number=index)
         events.append(event)
         valid_bytes += len(raw_line)
     _validate_event_sequence(events)
     return events, warnings
+
+
+def _truncate_title(value: str, limit: int = 100) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1] + "…"
 
 
 def _truncate_file(path: Path, length: int) -> None:
@@ -289,12 +443,14 @@ def _replay(
     str | None,
     dict[str, object] | None,
     str | None,
+    list[CompactionRecord],
 ]:
     conversation: list[ConversationExchange] = []
     conversation_models: list[str | None] = []
     pending: AssistantExchange | None = None
     pending_model: str | None = None
     compaction: dict[str, object] | None = None
+    compactions: list[CompactionRecord] = []
     model: str | None = None
     for event in events:
         if event.kind == "user_exchange":
@@ -322,9 +478,10 @@ def _replay(
             pending_model = None
         elif event.kind == "compaction_completed":
             compaction = _require_dict(event.payload, "compaction checkpoint")
+            compactions.append(CompactionRecord(len(conversation), compaction))
         elif event.kind == "model_changed":
             model = _require_string(_require_mapping(event.payload, "model change"), "current")
-    return conversation, conversation_models, pending, pending_model, compaction, model
+    return conversation, conversation_models, pending, pending_model, compaction, model, compactions
 
 
 def _encode_payload(payload: object) -> object:

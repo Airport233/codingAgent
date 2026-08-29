@@ -110,7 +110,8 @@
 
 分支：`feature/cli-hardening`
 
-- Codex 风格滚动式交互、斜杠命令和 thinking 折叠；
+- Textual 全屏 TUI：会话区、输入区、状态栏、工具卡片、斜杠命令和 thinking 折叠；
+- `--prompt` 保留稳定的 stdout 非交互模式；
 - 取消、恢复、错误呈现和状态区；
 - Windows/macOS 干净环境安装与主验收场景；
 - 检查所有 P0 需求的测试映射。
