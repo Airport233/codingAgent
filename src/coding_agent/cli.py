@@ -217,8 +217,12 @@ async def run_repl(
                     )
             elif isinstance(event, ApprovalRequested):
                 operation = event.arguments.get("command", event.arguments)
+                guardian_line = (
+                    f"[guardian] {event.guardian_note}\n" if event.guardian_note else ""
+                )
                 write_output(
                     f"[approval] {event.tool_name}: {operation}\n"
+                    f"{guardian_line}"
                     "Allow? [y] once / [a] session / [n] deny: "
                 )
                 answer = (await read_input()).strip().casefold()

@@ -2,24 +2,135 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fnmatch
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal, Protocol, cast
 
 from pydantic import BaseModel, Field
 
-from coding_agent.approval import ApprovalMode
+from coding_agent.approval import ApprovalAction, ApprovalMode
 from coding_agent.tools.base import RecoverableToolError, ToolOutput
 from coding_agent.tools.workspace import WorkspaceGuard
 
 RiskLevel = Literal["low", "elevated"]
+
+_CHAIN_SEPARATORS = frozenset({"&&", "||", ";", "|"})
+_ELEVATED_PATTERNS = (
+    re.compile(r"(^|\s)(rm|rmdir|del|erase|format)(\s|$)", re.IGNORECASE),
+    re.compile(r"git\s+(push|reset|clean)\b", re.IGNORECASE),
+    re.compile(r"\b(sudo|runas)\b", re.IGNORECASE),
+)
+_SENSITIVE_PATH_PATTERN = re.compile(r"\.(git|env)(\.\w+)?(?=$|[\\/\s'\"])", re.IGNORECASE)
+
+
+@dataclass(frozen=True, slots=True)
+class ShellRiskVerdict:
+    """The outcome of classifying a shell command, independent of approval mode."""
+
+    tier: RiskLevel
+    matched_rule: str | None
+    escapes_workspace: bool
+    touches_sensitive_path: bool
+    reason: str
+    forced_action: ApprovalAction | None = None
+
+
+def classify_shell_command(
+    command: str,
+    guard: WorkspaceGuard,
+    rules: Mapping[str, ApprovalAction] = MappingProxyType({}),
+) -> ShellRiskVerdict:
+    """Classify a shell command's risk without executing it.
+
+    Consulted both by ``ShellPolicy`` (for result metadata) and by
+    ``ConfigurableApprovalPolicy`` (to decide whether a command may be
+    silently auto-approved) so the two never disagree about a command's risk.
+    """
+    for pattern, action in rules.items():
+        if fnmatch.fnmatch(command, pattern):
+            return ShellRiskVerdict(
+                tier="elevated" if action != "allow" else "low",
+                matched_rule=pattern,
+                escapes_workspace=False,
+                touches_sensitive_path=False,
+                reason=f"matched configured rule {pattern!r}",
+                forced_action=action,
+            )
+
+    escapes_workspace = _escapes_workspace(command, guard)
+    touches_sensitive_path = bool(_SENSITIVE_PATH_PATTERN.search(command))
+    tier: RiskLevel = "elevated" if any(p.search(command) for p in _ELEVATED_PATTERNS) else "low"
+
+    forced_action: ApprovalAction | None = None
+    reason = "no risk indicators matched; governed by the configured approval mode"
+    if escapes_workspace:
+        forced_action = "ask"
+        reason = "command changes directory or references a path outside the workspace"
+    elif touches_sensitive_path:
+        forced_action = "ask"
+        reason = "command references a protected path (.git or .env)"
+    elif tier == "elevated":
+        forced_action = "ask"
+        reason = "command matches a built-in destructive-command pattern"
+
+    return ShellRiskVerdict(
+        tier=tier,
+        matched_rule=None,
+        escapes_workspace=escapes_workspace,
+        touches_sensitive_path=touches_sensitive_path,
+        reason=reason,
+        forced_action=forced_action,
+    )
+
+
+def _escapes_workspace(command: str, guard: WorkspaceGuard) -> bool:
+    for segment in _split_chained_segments(command):
+        if not segment:
+            continue
+        if segment[0] == "cd" and len(segment) > 1 and not _stays_inside_workspace(
+            segment[1], guard
+        ):
+            return True
+        for token in segment[1:]:
+            if ("/" in token or "\\" in token) and not _stays_inside_workspace(token, guard):
+                return True
+    return False
+
+
+def _split_chained_segments(command: str) -> list[list[str]]:
+    try:
+        tokens = shlex.split(command, posix=sys.platform != "win32")
+    except ValueError:
+        return []
+    segments: list[list[str]] = [[]]
+    for token in tokens:
+        if token in _CHAIN_SEPARATORS:
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    return segments
+
+
+def _stays_inside_workspace(path_text: str, guard: WorkspaceGuard) -> bool:
+    candidate = Path(path_text)
+    if not candidate.is_absolute():
+        candidate = guard.root / candidate
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        return True
+    return resolved.is_relative_to(guard.root)
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +141,7 @@ class ShellConfig:
     max_output_bytes: int = 65_536
     termination_grace_seconds: float = 1
     executable: str | None = None
+    shell_rules: Mapping[str, ApprovalAction] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.default_timeout_seconds <= 0:
@@ -56,6 +168,7 @@ class ShellRequest:
     environment: dict[str, str]
     approval_mode: ApprovalMode
     risk_level: RiskLevel
+    risk_verdict: ShellRiskVerdict
 
 
 class ShellPolicy:
@@ -75,11 +188,6 @@ class ShellPolicy:
         }
     )
     _POSIX_ENVIRONMENT = frozenset({"home", "lang", "path", "term", "tmpdir"})
-    _ELEVATED_PATTERNS = (
-        re.compile(r"(^|\s)(rm|rmdir|del|erase|format)(\s|$)", re.IGNORECASE),
-        re.compile(r"git\s+(push|reset|clean)\b", re.IGNORECASE),
-        re.compile(r"\b(sudo|runas)\b", re.IGNORECASE),
-    )
 
     def __init__(
         self,
@@ -103,13 +211,17 @@ class ShellPolicy:
             raise RecoverableToolError(
                 f"timeout exceeds maximum of {self._config.max_timeout_seconds:g} seconds"
             )
+        verdict = classify_shell_command(
+            arguments.command, self._guard, self._config.shell_rules
+        )
         return ShellRequest(
             command=arguments.command,
             cwd=cwd,
             timeout_seconds=timeout,
             environment=self._safe_environment(),
             approval_mode=self._config.mode,
-            risk_level=self._risk_level(arguments.command),
+            risk_level=verdict.tier,
+            risk_verdict=verdict,
         )
 
     def _safe_environment(self) -> dict[str, str]:
@@ -121,11 +233,6 @@ class ShellPolicy:
             if folded in allowed or (not windows and folded.startswith("lc_")):
                 result[key] = value
         return result
-
-    def _risk_level(self, command: str) -> RiskLevel:
-        if any(pattern.search(command) for pattern in self._ELEVATED_PATTERNS):
-            return "elevated"
-        return "low"
 
 
 class ShellBackend(Protocol):
@@ -316,6 +423,9 @@ class ShellTool:
             "stderr_bytes": collector.stderr_bytes,
             "approval_mode": request.approval_mode,
             "risk_level": request.risk_level,
+            "escapes_workspace": request.risk_verdict.escapes_workspace,
+            "touches_sensitive_path": request.risk_verdict.touches_sensitive_path,
+            "matched_rule": request.risk_verdict.matched_rule,
         }
         content = _format_result(collector, metadata)
         return ToolOutput(content=content, metadata=metadata)

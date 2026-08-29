@@ -41,6 +41,7 @@ class ApprovalRequested:
     call_id: str
     tool_name: str
     arguments: dict[str, object]
+    guardian_note: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

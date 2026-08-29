@@ -301,8 +301,11 @@ class ApprovalScreen(Screen[tuple[str, ApprovalDecision]]):
         title = _tool_title(
             ToolStarted(self.request.call_id, self.request.tool_name, self.request.arguments)
         )
+        details = f"{title}\n\n{_tool_arguments(self.request.arguments)}"
+        if self.request.guardian_note:
+            details += f"\n\n[Guardian] {self.request.guardian_note}"
         yield Static(
-            f"{title}\n\n{_tool_arguments(self.request.arguments)}",
+            details,
             markup=False,
             id="approval-details",
         )

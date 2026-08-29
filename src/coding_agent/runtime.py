@@ -11,8 +11,9 @@ from anthropic import AsyncAnthropic
 from platformdirs import user_config_path, user_data_path
 
 from coding_agent.application import AgentApplication
-from coding_agent.approval import ApprovalMode, ConfigurableApprovalPolicy
+from coding_agent.approval import ApprovalAction, ApprovalMode, ConfigurableApprovalPolicy
 from coding_agent.context import ContextBudget, ContextManager, TokenEstimator
+from coding_agent.domain import ToolUseBlock
 from coding_agent.memory.loader import ProjectMemoryLoader
 from coding_agent.providers.anthropic import AnthropicMessagesProvider
 from coding_agent.providers.base import Provider
@@ -21,7 +22,10 @@ from coding_agent.sessions.jsonl import JsonlSessionRepository, Redactor
 from coding_agent.tools.builtin import BuiltinToolSource
 from coding_agent.tools.catalog import ToolCatalog
 from coding_agent.tools.dispatcher import ToolDispatcher
-from coding_agent.tools.shell import ShellConfig
+from coding_agent.tools.shell import ShellConfig, ShellRiskVerdict, classify_shell_command
+from coding_agent.tools.workspace import WorkspaceGuard
+
+_DEFAULT_GUARDED_TOOLS = frozenset({"shell", "write_file", "edit_file", "mkdir"})
 
 
 class RuntimeConfigurationError(ValueError):
@@ -45,6 +49,9 @@ class RuntimeSettings:
     supports_tools: bool = True
     auth_mode: str = "x-api-key"
     approval_mode: ApprovalMode = "auto"
+    guarded_tools: frozenset[str] = _DEFAULT_GUARDED_TOOLS
+    guardian_enabled: bool = False
+    shell_rules: dict[str, ApprovalAction] = field(default_factory=dict, repr=False)
     max_tokens_override: int | None = field(default=None, repr=False)
     max_steps_override: int | None = field(default=None, repr=False)
     context_window_override: int | None = field(default=None, repr=False)
@@ -130,6 +137,11 @@ class RuntimeSettings:
         )
         if approval_mode_value not in {"auto", "ask", "deny"}:
             raise RuntimeConfigurationError("Approval mode must be auto, ask, or deny")
+        guarded_tools = _guarded_tools(general)
+        guardian_enabled = _configured_bool(
+            general.get("guardian_enabled"), False, "guardian enabled"
+        )
+        shell_rules = _shell_rules(config)
         provider_extra_body = _thinking_options(model_config, resolved_max_tokens)
         supports_tools = _configured_bool(
             model_config.get("supports_tools"), True, "supports tools"
@@ -180,6 +192,9 @@ class RuntimeSettings:
             supports_tools=supports_tools,
             auth_mode=auth_mode,
             approval_mode=cast(ApprovalMode, approval_mode_value),
+            guarded_tools=guarded_tools,
+            guardian_enabled=guardian_enabled,
+            shell_rules=shell_rules,
             max_tokens_override=max_tokens,
             max_steps_override=max_steps,
             context_window_override=context_window,
@@ -282,8 +297,29 @@ async def create_runtime(
             supports_tools=settings.supports_tools,
         )
 
+    shell_guard = WorkspaceGuard(workspace_root)
+
+    def classify_tool_call(call: ToolUseBlock) -> ShellRiskVerdict | None:
+        if call.name != "shell":
+            return None
+        command = call.input.get("command")
+        if not isinstance(command, str):
+            return None
+        return classify_shell_command(command, shell_guard, settings.shell_rules)
+
+    def approval_override(call: ToolUseBlock) -> ApprovalAction | None:
+        verdict = classify_tool_call(call)
+        return verdict.forced_action if verdict is not None else None
+
     catalog = await ToolCatalog.create(
-        (BuiltinToolSource(workspace_root, shell_config=ShellConfig(mode=settings.approval_mode)),)
+        (
+            BuiltinToolSource(
+                workspace_root,
+                shell_config=ShellConfig(
+                    mode=settings.approval_mode, shell_rules=settings.shell_rules
+                ),
+            ),
+        )
     )
     context_manager = ContextManager(
         ContextBudget(
@@ -309,8 +345,11 @@ async def create_runtime(
         initial_compactions=recovered.compactions if recovered is not None else (),
         approval_policy=ConfigurableApprovalPolicy(
             mode=settings.approval_mode,
-            guarded_tools=frozenset({"shell"}),
+            guarded_tools=settings.guarded_tools,
+            classify=approval_override,
         ),
+        shell_classifier=classify_tool_call,
+        guardian_enabled=settings.guardian_enabled,
     )
     return AgentRuntime(application, store.session_id, client)
 
@@ -405,6 +444,28 @@ def _configured_bool(configured: object, default: bool, label: str) -> bool:
     if not isinstance(value, bool):
         raise RuntimeConfigurationError(f"Configured {label} has an invalid type")
     return value
+
+
+def _guarded_tools(general: Mapping[str, object]) -> frozenset[str]:
+    configured = general.get("guarded_tools")
+    if configured is None:
+        return _DEFAULT_GUARDED_TOOLS
+    if not isinstance(configured, list) or not all(isinstance(item, str) for item in configured):
+        raise RuntimeConfigurationError("Configured guarded_tools must be a list of strings")
+    return frozenset(configured)
+
+
+def _shell_rules(config: Mapping[str, object]) -> dict[str, ApprovalAction]:
+    permissions = _mapping(config.get("permissions"))
+    raw_rules = _mapping(permissions.get("shell_rules"))
+    rules: dict[str, ApprovalAction] = {}
+    for pattern, action in raw_rules.items():
+        if action not in {"allow", "ask", "deny"}:
+            raise RuntimeConfigurationError(
+                f"Configured shell rule for {pattern!r} must be allow, ask, or deny"
+            )
+        rules[pattern] = cast(ApprovalAction, action)
+    return rules
 
 
 def _thinking_options(model: Mapping[str, object], max_tokens: int) -> dict[str, object]:
