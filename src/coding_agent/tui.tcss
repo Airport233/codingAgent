@@ -90,9 +90,9 @@ Screen {
     color: #94a3b8;
 }
 
-#status-mode {
+#status-bar #status-mode {
     width: auto;
-    padding: 1 2 1 1;
+    padding: 1 6 1 1;
     color: #94a3b8;
 }
 
