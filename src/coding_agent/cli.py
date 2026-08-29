@@ -23,6 +23,7 @@ from coding_agent.events import (
     ThinkingFinished,
     ThinkingStarted,
     ToolFinished,
+    ToolOutputDelta,
     ToolStarted,
     WarningRaised,
 )
@@ -264,6 +265,8 @@ async def run_repl(
                 await application.resolve_approval(event.request_id, decision)
             elif isinstance(event, ToolStarted):
                 write_output(f"\n[tool] {_format_tool_call(event)}\n")
+            elif isinstance(event, ToolOutputDelta):
+                write_output(event.text)
             elif isinstance(event, ToolFinished):
                 write_output(f"[tool] {event.tool_name} {event.status}")
                 details = _format_tool_result(event)

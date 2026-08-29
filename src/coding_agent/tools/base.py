@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
@@ -27,6 +28,17 @@ class Tool(Protocol):
     def input_model(self) -> type[BaseModel]: ...
 
     async def execute(self, arguments: BaseModel) -> ToolOutput: ...
+
+
+type ToolOutputStream = Literal["stdout", "stderr"]
+type ToolOutputCallback = Callable[[ToolOutputStream, str], None]
+
+
+@runtime_checkable
+class StreamingTool(Protocol):
+    async def execute_with_output(
+        self, arguments: BaseModel, on_output: ToolOutputCallback
+    ) -> ToolOutput: ...
 
 
 class ToolSource(Protocol):

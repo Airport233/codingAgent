@@ -48,6 +48,7 @@ from coding_agent.events import (
     ThinkingFinished,
     ThinkingStarted,
     ToolFinished,
+    ToolOutputDelta,
     ToolStarted,
     WarningRaised,
 )
@@ -379,6 +380,7 @@ class CodingAgentTui(App[None]):
         self._thinking: tuple[Collapsible, Static] | None = None
         self._thinking_text = ""
         self._tools: dict[str, tuple[Collapsible, Static, str, str]] = {}
+        self._tool_output_text: dict[str, str] = {}
         self._plan_card: Static | None = None
         self._completion_mode: Literal["commands", "models", "skills"] | None = None
         self._completion_matches: list[str] = []
@@ -668,6 +670,8 @@ class CodingAgentTui(App[None]):
                 elif isinstance(event, ToolStarted):
                     self._finish_assistant_segment()
                     await self._tool_started(event)
+                elif isinstance(event, ToolOutputDelta):
+                    self._tool_output(event)
                 elif isinstance(event, ToolFinished):
                     self._tool_finished(event)
                 elif isinstance(event, ContextUsageChanged):
@@ -695,11 +699,23 @@ class CodingAgentTui(App[None]):
         panel = Collapsible(
             body,
             title=f"● {_tool_title(event)} · running",
-            collapsed=True,
+            collapsed=event.tool_name != "shell",
             classes="tool-card running",
         )
         self._tools[event.call_id] = (panel, body, _tool_title(event), details)
         await self._mount(panel)
+
+    def _tool_output(self, event: ToolOutputDelta) -> None:
+        item = self._tools.get(event.call_id)
+        if item is None:
+            return
+        _panel, body, _title, details = item
+        marker = "" if event.stream == "stdout" else "[stderr] "
+        output = _append_live_output(
+            self._tool_output_text.get(event.call_id, ""), marker + event.text
+        )
+        self._tool_output_text[event.call_id] = output
+        body.update(f"{details}\n\nLive output:\n{output or '(waiting for output)'}")
 
     def _tool_finished(self, event: ToolFinished) -> None:
         item = self._tools.get(event.call_id)
@@ -955,6 +971,7 @@ class CodingAgentTui(App[None]):
         self._thinking = None
         self._thinking_text = ""
         self._tools = {}
+        self._tool_output_text = {}
 
     def _finish_assistant_segment(self) -> None:
         """Make later text render after the event that ended this segment."""
@@ -1158,6 +1175,14 @@ def _preview_text(value: str, limit: int) -> str:
         return value
     omitted = len(value) - limit
     return f"{value[:limit]}\n… [{omitted} characters omitted from display]"
+
+
+def _append_live_output(current: str, addition: str, limit: int = 12_000) -> str:
+    combined = current + addition
+    if len(combined) <= limit:
+        return combined
+    marker = "… [earlier live output omitted]\n"
+    return marker + combined[-(limit - len(marker)) :]
 
 
 def _display_time(value: str) -> str:

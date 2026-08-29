@@ -3,7 +3,11 @@ from __future__ import annotations
 from pydantic import ValidationError
 
 from coding_agent.domain import ToolResultBlock, ToolUseBlock
-from coding_agent.tools.base import RecoverableToolError
+from coding_agent.tools.base import (
+    RecoverableToolError,
+    StreamingTool,
+    ToolOutputCallback,
+)
 from coding_agent.tools.catalog import ToolCatalog
 
 
@@ -11,7 +15,9 @@ class ToolDispatcher:
     def __init__(self, catalog: ToolCatalog) -> None:
         self.catalog = catalog
 
-    async def execute(self, call: ToolUseBlock) -> ToolResultBlock:
+    async def execute(
+        self, call: ToolUseBlock, *, on_output: ToolOutputCallback | None = None
+    ) -> ToolResultBlock:
         tool = self.catalog.get(call.name)
         if tool is None:
             return ToolResultBlock(
@@ -21,7 +27,10 @@ class ToolDispatcher:
             )
         try:
             arguments = tool.input_model.model_validate(call.input)
-            output = await tool.execute(arguments)
+            if on_output is not None and isinstance(tool, StreamingTool):
+                output = await tool.execute_with_output(arguments, on_output)
+            else:
+                output = await tool.execute(arguments)
         except (ValidationError, RecoverableToolError) as error:
             return ToolResultBlock(
                 tool_use_id=call.call_id,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
 import os
 import re
@@ -16,7 +17,7 @@ from typing import Any, Literal, Protocol, cast
 from pydantic import BaseModel, Field
 
 from coding_agent.approval import ApprovalMode
-from coding_agent.tools.base import RecoverableToolError, ToolOutput
+from coding_agent.tools.base import RecoverableToolError, ToolOutput, ToolOutputCallback
 from coding_agent.tools.workspace import WorkspaceGuard
 
 RiskLevel = Literal["low", "elevated"]
@@ -243,8 +244,16 @@ class _BoundedOutputCollector:
         self.stdout_bytes = 0
         self.stderr_bytes = 0
 
-    async def read(self, stream: asyncio.StreamReader, *, stderr: bool) -> None:
+    async def read(
+        self,
+        stream: asyncio.StreamReader,
+        *,
+        stderr: bool,
+        on_output: ToolOutputCallback | None = None,
+    ) -> None:
         destination = self.stderr if stderr else self.stdout
+        stream_name = "stderr" if stderr else "stdout"
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         while chunk := await stream.read(8192):
             if stderr:
                 self.stderr_bytes += len(chunk)
@@ -255,6 +264,14 @@ class _BoundedOutputCollector:
                 selected = chunk[:remaining]
                 destination.extend(selected)
                 self._stored_bytes += len(selected)
+                if on_output is not None:
+                    text = decoder.decode(selected, final=False)
+                    if text:
+                        on_output(stream_name, text)
+        if on_output is not None:
+            tail = decoder.decode(b"", final=True)
+            if tail:
+                on_output(stream_name, tail)
 
     @property
     def truncated(self) -> bool:
@@ -278,6 +295,16 @@ class ShellTool:
         self._backend = backend or create_shell_backend(executable=self._config.executable)
 
     async def execute(self, arguments: BaseModel) -> ToolOutput:
+        return await self._execute(arguments, on_output=None)
+
+    async def execute_with_output(
+        self, arguments: BaseModel, on_output: ToolOutputCallback
+    ) -> ToolOutput:
+        return await self._execute(arguments, on_output=on_output)
+
+    async def _execute(
+        self, arguments: BaseModel, *, on_output: ToolOutputCallback | None
+    ) -> ToolOutput:
         parsed = ShellInput.model_validate(arguments)
         request = self._policy.prepare(parsed)
         started = time.monotonic()
@@ -291,8 +318,8 @@ class ShellTool:
             raise RuntimeError("Shell backend did not create output pipes")
         collector = _BoundedOutputCollector(self._config.max_output_bytes)
         readers = (
-            asyncio.create_task(collector.read(process.stdout, stderr=False)),
-            asyncio.create_task(collector.read(process.stderr, stderr=True)),
+            asyncio.create_task(collector.read(process.stdout, stderr=False, on_output=on_output)),
+            asyncio.create_task(collector.read(process.stderr, stderr=True, on_output=on_output)),
         )
         timed_out = False
         try:

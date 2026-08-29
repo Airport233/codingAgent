@@ -749,6 +749,70 @@ async def test_tui_renders_collapsible_thinking_and_completed_tool_card() -> Non
         assert "all green" in str(tool.query_one(".tool-body").render())
 
 
+async def test_tui_updates_the_running_shell_card_with_streamed_output() -> None:
+    release = asyncio.Event()
+
+    class ShellInput(BaseModel):
+        command: str
+
+    class StreamingShell:
+        name = "shell"
+        description = "Stream a test command"
+        input_model = ShellInput
+
+        async def execute(self, arguments: BaseModel) -> ToolOutput:
+            return ToolOutput("exit_code: 0\nstdout:\nlive output")
+
+        async def execute_with_output(self, arguments: BaseModel, on_output) -> ToolOutput:
+            on_output("stdout", "live output\n")
+            await release.wait()
+            return await self.execute(arguments)
+
+    provider = FakeProvider(
+        [
+            AssistantExchange(
+                (ToolUseBlock("call-live", "shell", {"command": "run slow tests"}),),
+                "tool_use",
+            ),
+            AssistantExchange((TextBlock("Done."),), "end_turn"),
+        ]
+    )
+    app = CodingAgentTui(
+        AgentApplication(
+            provider,
+            ToolDispatcher(ToolCatalog({"shell": StreamingShell()})),
+            InMemorySessionStore(),
+        ),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        app.query_one("#composer").value = "Run slow tests"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        tool = app.query_one(".tool-card", Collapsible)
+        assert tool.collapsed is False
+        assert "live output" in str(tool.query_one(".tool-body").render())
+        assert "running" in tool.title
+
+        release.set()
+        await pilot.pause()
+        await pilot.pause()
+        assert "done" in tool.title
+        assert "exit_code: 0" in str(tool.query_one(".tool-body").render())
+
+
+async def test_live_tool_output_keeps_recent_text_within_display_bound() -> None:
+    rendered = tui_module._append_live_output("a" * 12_000, "LATEST", limit=100)
+
+    assert len(rendered) == 100
+    assert rendered.startswith("… [earlier live output omitted]")
+    assert rendered.endswith("LATEST")
+
+
 async def test_tui_renders_live_plan_card_from_update_plan_tool() -> None:
     state = PlanState()
     provider = FakeProvider(

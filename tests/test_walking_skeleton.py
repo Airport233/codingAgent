@@ -22,6 +22,7 @@ from coding_agent.events import (
     AgentFailed,
     TextDelta,
     ToolFinished,
+    ToolOutputDelta,
     ToolStarted,
     WarningRaised,
 )
@@ -172,6 +173,92 @@ async def test_multiple_tool_calls_keep_ids_and_results_in_order(workspace: Path
     assert continuation.assistant == assistant
     assert tuple(result.tool_use_id for result in continuation.results) == ("call-1", "call-2")
     assert tuple(result.content for result in continuation.results) == ("1: one", "1: two")
+
+
+@pytest.mark.asyncio
+async def test_streaming_tool_output_is_emitted_before_the_final_result() -> None:
+    class NoInput(BaseModel):
+        pass
+
+    class StreamingTool:
+        name = "streaming"
+        description = "Emit output before finishing"
+        input_model = NoInput
+
+        async def execute(self, arguments: BaseModel) -> ToolOutput:
+            return ToolOutput("final output")
+
+        async def execute_with_output(self, arguments: BaseModel, on_output) -> ToolOutput:
+            on_output("stdout", "first chunk\n")
+            await asyncio.sleep(0)
+            on_output("stderr", "warning chunk\n")
+            return ToolOutput("final output")
+
+    provider = FakeProvider(
+        [
+            AssistantExchange((ToolUseBlock("call-stream", "streaming", {}),), "tool_use"),
+            AssistantExchange((TextBlock("done"),), "end_turn"),
+        ]
+    )
+    sessions = InMemorySessionStore()
+    application = AgentApplication(
+        provider,
+        ToolDispatcher(ToolCatalog({"streaming": StreamingTool()})),
+        sessions,
+    )
+
+    events = [event async for event in application.run("stream output")]
+
+    first_delta = events.index(
+        ToolOutputDelta("call-stream", "streaming", "stdout", "first chunk\n")
+    )
+    second_delta = events.index(
+        ToolOutputDelta("call-stream", "streaming", "stderr", "warning chunk\n")
+    )
+    finished = next(index for index, event in enumerate(events) if isinstance(event, ToolFinished))
+    assert first_delta < second_delta < finished
+    assert "tool_output_delta" not in sessions.kinds
+
+
+@pytest.mark.asyncio
+async def test_streaming_is_suppressed_when_tool_arguments_require_redaction() -> None:
+    class SecretInput(BaseModel):
+        command: str
+
+    class StreamingSecretTool:
+        name = "shell"
+        description = "Echo a command"
+        input_model = SecretInput
+
+        async def execute(self, arguments: BaseModel) -> ToolOutput:
+            return ToolOutput("result=[REDACTED]")
+
+        async def execute_with_output(self, arguments: BaseModel, on_output) -> ToolOutput:
+            parsed = SecretInput.model_validate(arguments)
+            on_output("stdout", parsed.command)
+            return ToolOutput(parsed.command)
+
+    provider = FakeProvider(
+        [
+            AssistantExchange(
+                (ToolUseBlock("call-secret-stream", "shell", {"command": "secret-value"}),),
+                "tool_use",
+            ),
+            AssistantExchange((TextBlock("done"),), "end_turn"),
+        ]
+    )
+    application = AgentApplication(
+        provider,
+        ToolDispatcher(ToolCatalog({"shell": StreamingSecretTool()})),
+        InMemorySessionStore(),
+        display_redactor=Redactor(("secret-value",)).redact,
+    )
+
+    events = [event async for event in application.run("run secret command")]
+
+    assert not any(isinstance(event, ToolOutputDelta) for event in events)
+    finished = next(event for event in events if isinstance(event, ToolFinished))
+    assert "secret-value" not in finished.content
 
 
 @pytest.mark.asyncio

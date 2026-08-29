@@ -4,6 +4,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
+from typing import Literal
 
 from coding_agent.approval import (
     ApprovalDecision,
@@ -37,6 +38,7 @@ from coding_agent.events import (
     ThinkingFinished,
     ThinkingStarted,
     ToolFinished,
+    ToolOutputDelta,
     ToolStarted,
     WarningRaised,
 )
@@ -452,7 +454,14 @@ class AgentApplication:
                         arguments=self._redacted_mapping(call.input),
                     )
                     try:
-                        result = await self._dispatcher.execute(call)
+                        result = None
+                        async for execution_event in self._execute_tool(call):
+                            if isinstance(execution_event, ToolOutputDelta):
+                                yield execution_event
+                            else:
+                                result = execution_event
+                        if result is None:
+                            raise RuntimeError("Tool execution ended without a result")
                     except asyncio.CancelledError:
                         await self._sessions.append(
                             "tool_cancelled",
@@ -633,6 +642,33 @@ class AgentApplication:
             )
             for call in calls
         )
+
+    async def _execute_tool(
+        self, call: ToolUseBlock
+    ) -> AsyncIterator[ToolOutputDelta | ToolResultBlock]:
+        queue: asyncio.Queue[ToolOutputDelta | None] = asyncio.Queue()
+        safe_to_stream = self._redacted_mapping(call.input) == call.input
+
+        def on_output(stream: Literal["stdout", "stderr"], text: str) -> None:
+            redacted = self._redacted_text(text)
+            if redacted:
+                queue.put_nowait(ToolOutputDelta(call.call_id, call.name, stream, redacted))
+
+        execution = asyncio.create_task(
+            self._dispatcher.execute(
+                call,
+                on_output=on_output if safe_to_stream else None,
+            )
+        )
+        execution.add_done_callback(lambda _task: queue.put_nowait(None))
+        try:
+            while (event := await queue.get()) is not None:
+                yield event
+            yield await execution
+        except asyncio.CancelledError:
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
+            raise
 
     def _context_usage_changed(self, system_instructions: str | None) -> ContextUsageChanged | None:
         if self._context_manager is None:

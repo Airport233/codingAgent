@@ -503,6 +503,11 @@ async def test_repl_shows_shell_details_and_toggles_thinking() -> None:
             parsed = ShellInput.model_validate(arguments)
             return ToolOutput(f"stdout:\nran {parsed.command}", {"exit_code": 0})
 
+        async def execute_with_output(self, arguments: BaseModel, on_output) -> ToolOutput:
+            parsed = ShellInput.model_validate(arguments)
+            on_output("stdout", "live: starting tests\n")
+            return await self.execute(parsed)
+
     provider = FakeProvider(
         [
             AssistantExchange(
@@ -533,8 +538,10 @@ async def test_repl_shows_shell_details_and_toggles_thinking() -> None:
     assert "[thinking] inspect carefully" in rendered
     assert "must-not-be-rendered" not in rendered
     assert "[tool] shell [.] $ python -m unittest" in rendered
+    assert "live: starting tests" in rendered
     assert "stdout:\nran python -m unittest" in rendered
     assert "[tool] shell done" in rendered
+    assert rendered.index("live: starting tests") < rendered.index("[tool] shell done")
 
 
 @pytest.mark.asyncio

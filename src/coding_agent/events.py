@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from coding_agent.plan import PlanStep
 
@@ -60,6 +61,14 @@ class ToolStarted:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolOutputDelta:
+    call_id: str
+    tool_name: str
+    stream: Literal["stdout", "stderr"]
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class ToolFinished:
     call_id: str
     tool_name: str
@@ -106,6 +115,7 @@ type CoreEvent = (
     | ContextUsageChanged
     | PlanUpdated
     | ToolStarted
+    | ToolOutputDelta
     | ToolFinished
     | AgentCompleted
     | AgentFailed

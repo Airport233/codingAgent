@@ -17,6 +17,7 @@ from coding_agent.tools.shell import (
     ShellPolicy,
     ShellTool,
     WindowsPowerShellBackend,
+    _BoundedOutputCollector,
     create_shell_backend,
 )
 
@@ -115,6 +116,30 @@ def test_shell_policy_marks_risky_commands_without_executing_policy_decisions(
 
 
 @pytest.mark.asyncio
+async def test_bounded_collector_decodes_utf8_split_across_pipe_chunks() -> None:
+    class ScriptedReader:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self.chunks = chunks
+
+        async def read(self, _size: int) -> bytes:
+            return self.chunks.pop(0)
+
+    encoded = "你".encode()
+    reader = ScriptedReader([encoded[:1], encoded[1:], b""])
+    updates: list[tuple[str, str]] = []
+    collector = _BoundedOutputCollector(16)
+
+    await collector.read(
+        reader,  # type: ignore[arg-type]
+        stderr=False,
+        on_output=lambda stream, text: updates.append((stream, text)),
+    )
+
+    assert updates == [("stdout", "你")]
+    assert collector.stdout.decode("utf-8") == "你"
+
+
+@pytest.mark.asyncio
 async def test_shell_start_failures_are_recoverable(workspace: Path) -> None:
     class FailingBackend:
         async def start(self, command: str, *, cwd: Path, environment: dict[str, str]):
@@ -168,6 +193,27 @@ async def test_shell_streams_with_a_bounded_output_and_marks_truncation(
 
 
 @pytest.mark.asyncio
+async def test_shell_emits_bounded_utf8_output_while_running(workspace: Path) -> None:
+    tool = ShellTool(workspace, ShellConfig(max_output_bytes=128))
+    if sys.platform == "win32":
+        command = "Write-Output '你好-streaming'"
+    else:
+        command = f'"{sys.executable}" -c "print(\'你好-streaming\')"'
+    updates: list[tuple[str, str]] = []
+
+    result = await _execute_or_skip_sandbox(
+        tool,
+        ShellInput(command=command),
+        on_output=lambda stream, text: updates.append((stream, text)),
+    )
+
+    assert "你好-streaming" in "".join(text for _stream, text in updates)
+    assert {stream for stream, _text in updates} == {"stdout"}
+    assert sum(len(text.encode("utf-8")) for _stream, text in updates) <= 128
+    assert "你好-streaming" in result.content
+
+
+@pytest.mark.asyncio
 async def test_shell_timeout_terminates_the_process_group(workspace: Path) -> None:
     tool = ShellTool(
         workspace,
@@ -202,9 +248,16 @@ async def test_shell_cancellation_terminates_before_propagating(workspace: Path)
         await asyncio.wait_for(task, timeout=2)
 
 
-async def _execute_or_skip_sandbox(tool: ShellTool, arguments: ShellInput):
+async def _execute_or_skip_sandbox(
+    tool: ShellTool,
+    arguments: ShellInput,
+    *,
+    on_output=None,
+):
     try:
-        return await tool.execute(arguments)
+        if on_output is None:
+            return await tool.execute(arguments)
+        return await tool.execute_with_output(arguments, on_output)
     except RecoverableToolError as error:
         cause = error.__cause__
         if sys.platform == "win32" and isinstance(cause, PermissionError):
