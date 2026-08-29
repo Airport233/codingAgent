@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from rich.console import Console
 
 from coding_agent.application import AgentApplication
+from coding_agent.approval import ConfigurableApprovalPolicy
 from coding_agent.cli import CliTransition, _status_line, run_repl, write_console
 from coding_agent.domain import (
     AssistantExchange,
@@ -24,7 +25,9 @@ from coding_agent.domain import (
 )
 from coding_agent.events import (
     AgentCancelled,
+    AgentCompleted,
     AgentFailed,
+    ApprovalRequested,
     TextDelta,
     ThinkingDelta,
     ThinkingFinished,
@@ -45,6 +48,7 @@ from coding_agent.sessions.memory import InMemorySessionStore
 from coding_agent.tools.base import ToolOutput
 from coding_agent.tools.catalog import ToolCatalog
 from coding_agent.tools.dispatcher import ToolDispatcher
+from coding_agent.tools.shell import ShellRiskVerdict
 
 
 def test_runtime_settings_use_environment_without_exposing_private_values(tmp_path: Path) -> None:
@@ -566,6 +570,142 @@ async def test_provider_errors_are_redacted_before_reaching_cli_events() -> None
     assert "[REDACTED]" in events[-1].message
     assert "secret-value" not in events[-1].message
     assert store.kinds[-1] == "turn_failed"
+
+
+@pytest.mark.asyncio
+async def test_shell_classifier_logs_a_classification_event_for_every_shell_call() -> None:
+    verdict = ShellRiskVerdict(
+        tier="elevated",
+        matched_rule=None,
+        escapes_workspace=False,
+        touches_sensitive_path=False,
+        reason="matches a built-in destructive-command pattern",
+        forced_action="ask",
+    )
+    store = InMemorySessionStore()
+    application = AgentApplication(
+        FakeProvider(
+            [
+                AssistantExchange(
+                    (ToolUseBlock("call-1", "shell", {"command": "git push origin main"}),),
+                    "tool_use",
+                ),
+                AssistantExchange((TextBlock("done"),), "end_turn"),
+            ]
+        ),
+        ToolDispatcher(ToolCatalog({"shell": _RecordingShellTool()})),
+        store,
+        shell_classifier=lambda call: verdict if call.name == "shell" else None,
+    )
+
+    async for event in application.run("push"):
+        if isinstance(event, ApprovalRequested):
+            await application.resolve_approval(event.request_id, "allow_once")
+
+    classified = next(
+        record.payload for record in store.records if record.kind == "shell_command_classified"
+    )
+    assert classified["tier"] == "elevated"
+    assert classified["reason"] == verdict.reason
+    assert classified["command"] == "git push origin main"
+
+
+@pytest.mark.asyncio
+async def test_guardian_note_is_surfaced_and_logged_when_enabled() -> None:
+    store = InMemorySessionStore()
+    application = AgentApplication(
+        FakeProvider(
+            [
+                AssistantExchange(
+                    (ToolUseBlock("call-1", "shell", {"command": "rm -rf build"}),), "tool_use"
+                ),
+                AssistantExchange((TextBlock("Removes the build directory."),), "end_turn"),
+                AssistantExchange((TextBlock("done"),), "end_turn"),
+            ]
+        ),
+        ToolDispatcher(ToolCatalog({"shell": _RecordingShellTool()})),
+        store,
+        approval_policy=ConfigurableApprovalPolicy("ask", frozenset({"shell"})),
+        guardian_enabled=True,
+        display_redactor=Redactor(("build",)).redact,
+    )
+
+    requested: ApprovalRequested | None = None
+    async for event in application.run("clean"):
+        if isinstance(event, ApprovalRequested):
+            requested = event
+            await application.resolve_approval(event.request_id, "allow_once")
+
+    assert requested is not None
+    assert requested.guardian_note is not None
+    assert requested.guardian_note == "Removes the [REDACTED] directory."
+    reviewed = next(
+        record.payload for record in store.records if record.kind == "guardian_reviewed"
+    )
+    assert reviewed["failed"] is False
+    assert reviewed["note"] == "Removes the [REDACTED] directory."
+
+
+@pytest.mark.asyncio
+async def test_guardian_failure_does_not_block_approval() -> None:
+    class GuardianFailsOnSecondCallProvider:
+        def __init__(self) -> None:
+            self._calls = 0
+
+        async def stream(self, *_args: object) -> AsyncIterator[ProviderEvent]:
+            self._calls += 1
+            if self._calls == 1:
+                yield ProviderResponseFinished(
+                    exchange=AssistantExchange(
+                        (ToolUseBlock("call-1", "shell", {"command": "rm -rf build"}),),
+                        "tool_use",
+                    )
+                )
+            elif self._calls == 2:
+                raise RuntimeError("guardian model unavailable")
+            else:
+                yield ProviderResponseFinished(
+                    exchange=AssistantExchange((TextBlock("done"),), "end_turn")
+                )
+
+    store = InMemorySessionStore()
+    application = AgentApplication(
+        GuardianFailsOnSecondCallProvider(),
+        ToolDispatcher(ToolCatalog({"shell": _RecordingShellTool()})),
+        store,
+        approval_policy=ConfigurableApprovalPolicy("ask", frozenset({"shell"})),
+        guardian_enabled=True,
+    )
+
+    requested: ApprovalRequested | None = None
+    events = []
+    async for event in application.run("clean"):
+        events.append(event)
+        if isinstance(event, ApprovalRequested):
+            requested = event
+            await application.resolve_approval(event.request_id, "allow_once")
+
+    assert requested is not None
+    assert requested.guardian_note is None
+    assert isinstance(events[-1], AgentCompleted)
+    reviewed = next(
+        record.payload for record in store.records if record.kind == "guardian_reviewed"
+    )
+    assert reviewed["failed"] is True
+    assert reviewed["note"] is None
+
+
+class _ShellCommandInput(BaseModel):
+    command: str
+
+
+class _RecordingShellTool:
+    name = "shell"
+    description = "Run a command"
+    input_model = _ShellCommandInput
+
+    async def execute(self, arguments: BaseModel) -> ToolOutput:
+        return ToolOutput("exit_code: 0")
 
 
 @pytest.mark.asyncio

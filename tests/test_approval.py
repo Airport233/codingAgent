@@ -131,6 +131,95 @@ async def test_allow_session_skips_later_prompts_for_the_same_tool() -> None:
 
 
 @pytest.mark.asyncio
+async def test_classify_override_forces_ask_even_in_auto_mode() -> None:
+    shell = RecordingShell()
+    application = AgentApplication(
+        FakeProvider(
+            [
+                AssistantExchange(
+                    (ToolUseBlock("call-1", "shell", {"command": "rm -rf /"}),), "tool_use"
+                ),
+                AssistantExchange((TextBlock("done"),), "end_turn"),
+            ]
+        ),
+        ToolDispatcher(ToolCatalog({"shell": shell})),
+        InMemorySessionStore(),
+        approval_policy=ConfigurableApprovalPolicy(
+            "auto", frozenset(), classify=lambda call: "ask" if call.name == "shell" else None
+        ),
+    )
+    events = []
+
+    async for event in application.run("clean up"):
+        events.append(event)
+        if isinstance(event, ApprovalRequested):
+            await application.resolve_approval(event.request_id, "allow_once")
+
+    assert sum(isinstance(event, ApprovalRequested) for event in events) == 1
+    assert shell.commands == ["rm -rf /"]
+
+
+@pytest.mark.asyncio
+async def test_classify_override_forces_allow_bypassing_guarded_tools() -> None:
+    shell = RecordingShell()
+    application = AgentApplication(
+        FakeProvider(
+            [
+                AssistantExchange(
+                    (ToolUseBlock("call-1", "shell", {"command": "git status"}),), "tool_use"
+                ),
+                AssistantExchange((TextBlock("done"),), "end_turn"),
+            ]
+        ),
+        ToolDispatcher(ToolCatalog({"shell": shell})),
+        InMemorySessionStore(),
+        approval_policy=ConfigurableApprovalPolicy(
+            "ask", frozenset({"shell"}), classify=lambda call: "allow"
+        ),
+    )
+
+    events = [event async for event in application.run("check status")]
+
+    assert not any(isinstance(event, ApprovalRequested) for event in events)
+    assert shell.commands == ["git status"]
+
+
+@pytest.mark.asyncio
+async def test_classify_override_ignores_allow_session_for_forced_ask() -> None:
+    shell = RecordingShell()
+    application = AgentApplication(
+        FakeProvider(
+            [
+                AssistantExchange(
+                    (
+                        ToolUseBlock("call-1", "shell", {"command": "pwd"}),
+                        ToolUseBlock("call-2", "shell", {"command": "rm -rf /"}),
+                    ),
+                    "tool_use",
+                ),
+                AssistantExchange((TextBlock("done"),), "end_turn"),
+            ]
+        ),
+        ToolDispatcher(ToolCatalog({"shell": shell})),
+        InMemorySessionStore(),
+        approval_policy=ConfigurableApprovalPolicy(
+            "ask",
+            frozenset({"shell"}),
+            classify=lambda call: "ask" if "rm" in call.input.get("command", "") else None,
+        ),
+    )
+    requests = 0
+
+    async for event in application.run("run both"):
+        if isinstance(event, ApprovalRequested):
+            requests += 1
+            await application.resolve_approval(event.request_id, "allow_session")
+
+    assert requests == 2
+    assert shell.commands == ["pwd", "rm -rf /"]
+
+
+@pytest.mark.asyncio
 async def test_deny_policy_never_requests_or_executes() -> None:
     shell = RecordingShell()
     application = AgentApplication(

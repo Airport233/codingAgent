@@ -17,8 +17,10 @@ from coding_agent.tools.shell import (
     ShellPolicy,
     ShellTool,
     WindowsPowerShellBackend,
+    classify_shell_command,
     create_shell_backend,
 )
+from coding_agent.tools.workspace import WorkspaceGuard
 
 
 @pytest.fixture
@@ -200,6 +202,131 @@ async def test_shell_cancellation_terminates_before_propagating(workspace: Path)
 
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=2)
+
+
+def test_classify_shell_command_allows_safe_commands_to_follow_the_configured_mode(
+    workspace: Path,
+) -> None:
+    guard = WorkspaceGuard(workspace)
+
+    verdict = classify_shell_command("pwd", guard)
+
+    assert verdict.tier == "low"
+    assert verdict.forced_action is None
+    assert verdict.escapes_workspace is False
+    assert verdict.touches_sensitive_path is False
+
+
+def test_classify_shell_command_forces_ask_for_builtin_elevated_patterns(
+    workspace: Path,
+) -> None:
+    guard = WorkspaceGuard(workspace)
+
+    verdict = classify_shell_command("git push origin main", guard)
+
+    assert verdict.tier == "elevated"
+    assert verdict.forced_action == "ask"
+
+
+def test_classify_shell_command_detects_cd_escaping_the_workspace(workspace: Path) -> None:
+    guard = WorkspaceGuard(workspace)
+
+    verdict = classify_shell_command("cd .. && ls", guard)
+
+    assert verdict.escapes_workspace is True
+    assert verdict.forced_action == "ask"
+
+
+def test_classify_shell_command_allows_cd_within_the_workspace(workspace: Path) -> None:
+    (workspace / "nested").mkdir()
+    guard = WorkspaceGuard(workspace)
+
+    verdict = classify_shell_command("cd nested && ls", guard)
+
+    assert verdict.escapes_workspace is False
+    assert verdict.forced_action is None
+
+
+def test_classify_shell_command_detects_absolute_path_argument_outside_workspace(
+    workspace: Path,
+) -> None:
+    guard = WorkspaceGuard(workspace)
+
+    verdict = classify_shell_command("cat /etc/passwd", guard)
+
+    assert verdict.escapes_workspace is True
+    assert verdict.forced_action == "ask"
+
+
+def test_classify_shell_command_allows_absolute_path_argument_inside_workspace(
+    workspace: Path,
+) -> None:
+    guard = WorkspaceGuard(workspace)
+    target = (workspace / "inside.txt").resolve()
+    target.write_text("hello", encoding="utf-8")
+
+    verdict = classify_shell_command(f"cat {target}", guard)
+
+    assert verdict.escapes_workspace is False
+
+
+def test_classify_shell_command_detects_sensitive_paths_outside_file_tools(
+    workspace: Path,
+) -> None:
+    guard = WorkspaceGuard(workspace)
+
+    verdict = classify_shell_command("cat .env", guard)
+
+    assert verdict.touches_sensitive_path is True
+    assert verdict.forced_action == "ask"
+
+    git_verdict = classify_shell_command("rm -rf .git", guard)
+    assert git_verdict.touches_sensitive_path is True
+
+
+def test_classify_shell_command_configured_rules_take_precedence(workspace: Path) -> None:
+    guard = WorkspaceGuard(workspace)
+
+    denied = classify_shell_command("rm -rf build", guard, {"rm *": "ask"})
+    allowed = classify_shell_command("git status", guard, {"git status": "allow"})
+
+    assert denied.forced_action == "ask"
+    assert denied.matched_rule == "rm *"
+    assert allowed.forced_action == "allow"
+
+
+def test_classify_shell_command_tolerates_unparseable_quoting(workspace: Path) -> None:
+    guard = WorkspaceGuard(workspace)
+
+    verdict = classify_shell_command("echo 'unterminated", guard)
+
+    assert verdict.escapes_workspace is False
+
+
+def test_classify_shell_command_tolerates_trailing_chain_separator(workspace: Path) -> None:
+    guard = WorkspaceGuard(workspace)
+
+    verdict = classify_shell_command("ls &&", guard)
+
+    assert verdict.escapes_workspace is False
+
+
+def test_classify_shell_command_treats_unresolvable_paths_as_safe(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guard = WorkspaceGuard(workspace)
+    original_resolve = Path.resolve
+
+    def failing_resolve(self: Path, *args: object, **kwargs: object) -> Path:
+        if self.name == "bad":
+            raise OSError("simulated resolution failure")
+        return original_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", failing_resolve)
+
+    verdict = classify_shell_command("cat nested/bad", guard)
+
+    assert verdict.escapes_workspace is False
 
 
 async def _execute_or_skip_sandbox(tool: ShellTool, arguments: ShellInput):

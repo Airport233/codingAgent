@@ -20,6 +20,7 @@ from coding_agent.domain import (
     ThinkingBlock,
     ToolContinuationExchange,
     ToolResultBlock,
+    ToolUseBlock,
     UserExchange,
 )
 from coding_agent.events import (
@@ -47,6 +48,7 @@ from coding_agent.providers.base import (
 )
 from coding_agent.sessions.base import SessionStore
 from coding_agent.tools.dispatcher import ToolDispatcher
+from coding_agent.tools.shell import ShellRiskVerdict
 
 
 class AgentApplication:
@@ -63,6 +65,8 @@ class AgentApplication:
         display_redactor: Callable[[object], object] | None = None,
         initial_compactions: Sequence[CompactionRecord] = (),
         approval_policy: ApprovalPolicy | None = None,
+        shell_classifier: Callable[[ToolUseBlock], ShellRiskVerdict | None] | None = None,
+        guardian_enabled: bool = False,
     ) -> None:
         self._provider = provider
         self._dispatcher = dispatcher
@@ -76,6 +80,8 @@ class AgentApplication:
         self._display_redactor = display_redactor or (lambda value: value)
         self._compaction_history = tuple(initial_compactions)
         self._approval_policy = approval_policy or ConfigurableApprovalPolicy()
+        self._shell_classifier = shell_classifier
+        self._guardian_enabled = guardian_enabled
         self._pending_approvals: dict[str, asyncio.Future[ApprovalDecision]] = {}
         self._closed = False
 
@@ -164,6 +170,28 @@ class AgentApplication:
                 response = event.exchange
         if response is None or response.stop_reason != "end_turn":
             raise RuntimeError("Provider did not complete the context summary")
+        return response.text
+
+    async def _request_shell_guardian_review(self, command: str) -> str | None:
+        """Ask the model for a second opinion on a shell command's risk.
+
+        This is advisory only: the note is surfaced to the human approver via
+        ApprovalRequested.guardian_note and never converted into an automatic
+        allow. A failure here must never block the normal approval flow.
+        """
+        instruction = UserExchange(
+            "You are a safety reviewer, not the agent doing the task. In one or two short "
+            "sentences, state what the following shell command does and any concrete risk "
+            "(data loss, leaving the project directory, credential exposure). Do not approve "
+            "or deny it; a human will decide. Do not call tools.\n\n"
+            f"Command: {command}"
+        )
+        response: AssistantExchange | None = None
+        async for event in self._provider.stream((instruction,), (), None):
+            if isinstance(event, ProviderResponseFinished):
+                response = event.exchange
+        if response is None or response.stop_reason != "end_turn" or not response.text:
+            return None
         return response.text
 
     async def run(self, prompt: str) -> AsyncIterator[CoreEvent]:
@@ -296,6 +324,22 @@ class AgentApplication:
             if response.tool_uses:
                 results: list[ToolResultBlock] = []
                 for call_index, call in enumerate(response.tool_uses):
+                    if self._shell_classifier is not None:
+                        verdict = self._shell_classifier(call)
+                        if verdict is not None:
+                            await self._sessions.append(
+                                "shell_command_classified",
+                                {
+                                    "call_id": call.call_id,
+                                    "tool_name": call.name,
+                                    "command": self._redacted_text(call.input.get("command", "")),
+                                    "tier": verdict.tier,
+                                    "matched_rule": verdict.matched_rule,
+                                    "escapes_workspace": verdict.escapes_workspace,
+                                    "touches_sensitive_path": verdict.touches_sensitive_path,
+                                    "reason": verdict.reason,
+                                },
+                            )
                     approval = self._approval_policy.evaluate(call)
                     if approval == "ask":
                         request_id = uuid.uuid4().hex
@@ -303,6 +347,26 @@ class AgentApplication:
                             asyncio.get_running_loop().create_future()
                         )
                         self._pending_approvals[request_id] = pending
+                        guardian_note: str | None = None
+                        if self._guardian_enabled and call.name == "shell":
+                            command = call.input.get("command")
+                            if isinstance(command, str):
+                                try:
+                                    guardian_note = await self._request_shell_guardian_review(
+                                        command
+                                    )
+                                except Exception:
+                                    guardian_note = None
+                                await self._sessions.append(
+                                    "guardian_reviewed",
+                                    {
+                                        "call_id": call.call_id,
+                                        "note": self._redacted_text(guardian_note)
+                                        if guardian_note is not None
+                                        else None,
+                                        "failed": guardian_note is None,
+                                    },
+                                )
                         await self._sessions.append(
                             "approval_requested",
                             {
@@ -310,6 +374,7 @@ class AgentApplication:
                                 "call_id": call.call_id,
                                 "tool_name": call.name,
                                 "input": call.input,
+                                "guardian_note": guardian_note,
                             },
                         )
                         yield ApprovalRequested(
@@ -317,6 +382,9 @@ class AgentApplication:
                             call_id=call.call_id,
                             tool_name=call.name,
                             arguments=self._redacted_mapping(call.input),
+                            guardian_note=self._redacted_text(guardian_note)
+                            if guardian_note is not None
+                            else None,
                         )
                         try:
                             decision = await pending

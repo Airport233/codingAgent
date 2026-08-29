@@ -1,6 +1,28 @@
 [general]
 default_model = "example/example-model"
 approval_mode = "ask"
+# Tools that require approval under "ask" mode. Defaults to this list when
+# omitted. Read-only tools (read_file, code_search) are never guarded.
+guarded_tools = ["shell", "write_file", "edit_file", "mkdir"]
+# When true, an extra provider call asks the model for a one- or two-sentence
+# risk assessment of a shell command before showing the approval prompt. The
+# note is advisory only and never bypasses human approval.
+guardian_enabled = false
+
+# Optional glob rules for shell commands, matched against the full command
+# text in declaration order (first match wins). A matching rule's action
+# overrides both guarded_tools membership and approval_mode -- including
+# forcing "allow" for a command that would otherwise be gated. Commands that
+# match none of these fall back to the built-in destructive-command patterns
+# (rm/git push/sudo, etc.) and to escape/sensitive-path detection, which can
+# still force "ask" even when a command matches nothing here.
+[permissions.shell_rules]
+"git status" = "allow"
+"git diff *" = "allow"
+"rm *" = "ask"
+"rm -rf *" = "ask"
+"git push *" = "ask"
+"sudo *" = "ask"
 
 [providers.example]
 protocol = "anthropic-messages"
