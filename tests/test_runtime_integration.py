@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 from collections.abc import AsyncIterator, Iterator
@@ -14,14 +15,29 @@ from coding_agent.application import AgentApplication
 from coding_agent.cli import CliTransition, _status_line, run_repl, write_console
 from coding_agent.domain import (
     AssistantExchange,
+    RedactedThinkingBlock,
     TextBlock,
     ThinkingBlock,
     ToolContinuationExchange,
     ToolUseBlock,
     UserExchange,
 )
-from coding_agent.events import AgentFailed, WarningRaised
-from coding_agent.providers.base import ProviderEvent
+from coding_agent.events import (
+    AgentCancelled,
+    AgentFailed,
+    TextDelta,
+    ThinkingDelta,
+    ThinkingFinished,
+    ThinkingStarted,
+    ToolStarted,
+    WarningRaised,
+)
+from coding_agent.providers.base import (
+    ProviderEvent,
+    ProviderResponseFinished,
+    ProviderTextDelta,
+    ProviderThinkingDelta,
+)
 from coding_agent.providers.fake import FakeProvider
 from coding_agent.runtime import RuntimeConfigurationError, RuntimeSettings, create_runtime
 from coding_agent.sessions.jsonl import Redactor
@@ -550,6 +566,264 @@ async def test_provider_errors_are_redacted_before_reaching_cli_events() -> None
     assert "[REDACTED]" in events[-1].message
     assert "secret-value" not in events[-1].message
     assert store.kinds[-1] == "turn_failed"
+
+
+@pytest.mark.asyncio
+async def test_thinking_is_closed_when_the_provider_fails_mid_thought() -> None:
+    class FailsWhileThinkingProvider:
+        async def stream(self, *_args: object) -> AsyncIterator[ProviderEvent]:
+            yield ProviderThinkingDelta(thinking="considering the request")
+            raise RuntimeError("connection dropped")
+
+    store = InMemorySessionStore()
+    application = AgentApplication(
+        FailsWhileThinkingProvider(),
+        ToolDispatcher(ToolCatalog({})),
+        store,
+    )
+
+    events = [event async for event in application.run("question")]
+
+    thinking_started = [e for e in events if isinstance(e, ThinkingStarted)]
+    thinking_finished = [e for e in events if isinstance(e, ThinkingFinished)]
+    assert len(thinking_started) == 1
+    assert len(thinking_finished) == 1
+    assert events.index(thinking_finished[0]) > events.index(thinking_started[0])
+    assert isinstance(events[-1], AgentFailed)
+    assert events.index(thinking_finished[0]) < events.index(events[-1])
+
+
+@pytest.mark.asyncio
+async def test_thinking_is_closed_when_the_provider_is_cancelled_mid_thought() -> None:
+    class CancelledWhileThinkingProvider:
+        async def stream(self, *_args: object) -> AsyncIterator[ProviderEvent]:
+            yield ProviderThinkingDelta(thinking="considering the request")
+            raise asyncio.CancelledError()
+
+    store = InMemorySessionStore()
+    application = AgentApplication(
+        CancelledWhileThinkingProvider(),
+        ToolDispatcher(ToolCatalog({})),
+        store,
+    )
+
+    events = [event async for event in application.run("question")]
+
+    thinking_finished = [e for e in events if isinstance(e, ThinkingFinished)]
+    assert len(thinking_finished) == 1
+    assert isinstance(events[-1], AgentCancelled)
+    assert events.index(thinking_finished[0]) < events.index(events[-1])
+
+
+@pytest.mark.asyncio
+async def test_recovered_thinking_without_deltas_still_surfaces_its_text() -> None:
+    class DeltaLessThinkingProvider:
+        async def stream(self, *_args: object) -> AsyncIterator[ProviderEvent]:
+            yield ProviderResponseFinished(
+                exchange=AssistantExchange(
+                    blocks=(
+                        ThinkingBlock(thinking="a real chain of reasoning", signature="sig"),
+                        TextBlock(text="Here is my answer."),
+                    ),
+                    stop_reason="end_turn",
+                )
+            )
+
+    store = InMemorySessionStore()
+    application = AgentApplication(
+        DeltaLessThinkingProvider(),
+        ToolDispatcher(ToolCatalog({})),
+        store,
+    )
+
+    events = [event async for event in application.run("hello")]
+
+    thinking_deltas = [e for e in events if isinstance(e, ThinkingDelta)]
+    assert any(e.text == "a real chain of reasoning" for e in thinking_deltas)
+    started_index = next(i for i, e in enumerate(events) if isinstance(e, ThinkingStarted))
+    finished_index = next(i for i, e in enumerate(events) if isinstance(e, ThinkingFinished))
+    delta_index = next(i for i, e in enumerate(events) if isinstance(e, ThinkingDelta))
+    assert started_index < delta_index < finished_index
+
+
+@pytest.mark.asyncio
+async def test_purely_redacted_thinking_still_closes_without_a_delta() -> None:
+    class RedactedOnlyProvider:
+        async def stream(self, *_args: object) -> AsyncIterator[ProviderEvent]:
+            yield ProviderResponseFinished(
+                exchange=AssistantExchange(
+                    blocks=(
+                        RedactedThinkingBlock(data="opaque"),
+                        TextBlock(text="answer"),
+                    ),
+                    stop_reason="end_turn",
+                )
+            )
+
+    store = InMemorySessionStore()
+    application = AgentApplication(
+        RedactedOnlyProvider(),
+        ToolDispatcher(ToolCatalog({})),
+        store,
+    )
+
+    events = [event async for event in application.run("hello")]
+
+    assert not any(isinstance(e, ThinkingDelta) for e in events)
+    assert any(isinstance(e, ThinkingStarted) for e in events)
+    assert any(isinstance(e, ThinkingFinished) for e in events)
+
+
+@pytest.mark.asyncio
+async def test_live_streamed_thinking_is_not_replayed_a_second_time_after_text() -> None:
+    """Regression: once thinking streamed live via deltas and closed before the
+    text segment, the post-loop recovery fallback must not replay the same
+    thinking again after the reply -- that produced a second 'Thinking ·
+    complete' panel sandwiching the reply in the TUI."""
+
+    class LiveThenBundledProvider:
+        async def stream(self, *_args: object) -> AsyncIterator[ProviderEvent]:
+            yield ProviderThinkingDelta(thinking="live chain of reasoning")
+            yield ProviderTextDelta(text="Here is my answer.")
+            yield ProviderResponseFinished(
+                exchange=AssistantExchange(
+                    blocks=(
+                        ThinkingBlock(thinking="live chain of reasoning", signature="sig"),
+                        TextBlock(text="Here is my answer."),
+                    ),
+                    stop_reason="end_turn",
+                )
+            )
+
+    store = InMemorySessionStore()
+    application = AgentApplication(
+        LiveThenBundledProvider(),
+        ToolDispatcher(ToolCatalog({})),
+        store,
+    )
+
+    events = [event async for event in application.run("hello")]
+
+    assert sum(isinstance(e, ThinkingStarted) for e in events) == 1
+    assert sum(isinstance(e, ThinkingFinished) for e in events) == 1
+    text_index = next(i for i, e in enumerate(events) if isinstance(e, TextDelta))
+    finished_index = next(i for i, e in enumerate(events) if isinstance(e, ThinkingFinished))
+    assert finished_index < text_index
+
+
+@pytest.mark.asyncio
+async def test_trailing_live_thinking_closes_before_a_tool_call_with_no_text() -> None:
+    """Thinking that ends a step directly (tool_use follows, no text delta at
+    all) must still close via the main-line 'thinking_active' check, not the
+    exception handlers or the no-live-delta recovery path."""
+
+    class ThinkThenToolProvider:
+        def __init__(self) -> None:
+            self._calls = 0
+
+        async def stream(self, *_args: object) -> AsyncIterator[ProviderEvent]:
+            self._calls += 1
+            if self._calls == 1:
+                yield ProviderThinkingDelta(thinking="deciding which tool to call")
+                yield ProviderResponseFinished(
+                    exchange=AssistantExchange(
+                        blocks=(
+                            ThinkingBlock(thinking="deciding which tool to call", signature="sig"),
+                            ToolUseBlock("call-1", "noop", {}),
+                        ),
+                        stop_reason="tool_use",
+                    )
+                )
+            else:
+                yield ProviderTextDelta(text="done")
+                yield ProviderResponseFinished(
+                    exchange=AssistantExchange(
+                        blocks=(TextBlock(text="done"),),
+                        stop_reason="end_turn",
+                    )
+                )
+
+    class NoopInput(BaseModel):
+        pass
+
+    class NoopTool:
+        name = "noop"
+        description = "does nothing"
+        input_model = NoopInput
+
+        async def execute(self, arguments: BaseModel) -> ToolOutput:
+            del arguments
+            return ToolOutput("ok", {})
+
+    store = InMemorySessionStore()
+    application = AgentApplication(
+        ThinkThenToolProvider(),
+        ToolDispatcher(ToolCatalog({"noop": NoopTool()})),
+        store,
+    )
+
+    events = [event async for event in application.run("hello")]
+
+    assert sum(isinstance(e, ThinkingStarted) for e in events) == 1
+    assert sum(isinstance(e, ThinkingFinished) for e in events) == 1
+    finished_index = next(i for i, e in enumerate(events) if isinstance(e, ThinkingFinished))
+    tool_started_index = next(i for i, e in enumerate(events) if isinstance(e, ToolStarted))
+    assert finished_index < tool_started_index
+
+
+@pytest.mark.asyncio
+async def test_text_only_response_emits_no_thinking_events() -> None:
+    class TextOnlyProvider:
+        async def stream(self, *_args: object) -> AsyncIterator[ProviderEvent]:
+            yield ProviderTextDelta(text="just an answer")
+            yield ProviderResponseFinished(
+                exchange=AssistantExchange(
+                    blocks=(TextBlock(text="just an answer"),),
+                    stop_reason="end_turn",
+                )
+            )
+
+    store = InMemorySessionStore()
+    application = AgentApplication(
+        TextOnlyProvider(),
+        ToolDispatcher(ToolCatalog({})),
+        store,
+    )
+
+    events = [event async for event in application.run("hello")]
+
+    thinking_events = (ThinkingStarted, ThinkingDelta, ThinkingFinished)
+    assert not any(isinstance(e, thinking_events) for e in events)
+
+
+@pytest.mark.asyncio
+async def test_empty_non_redacted_thinking_block_emits_no_thinking_events() -> None:
+    """A ThinkingBlock with no text and no live deltas carries nothing worth
+    showing -- unlike a RedactedThinkingBlock, it should not open a panel."""
+
+    class EmptyThinkingProvider:
+        async def stream(self, *_args: object) -> AsyncIterator[ProviderEvent]:
+            yield ProviderResponseFinished(
+                exchange=AssistantExchange(
+                    blocks=(
+                        ThinkingBlock(thinking="", signature=""),
+                        TextBlock(text="answer"),
+                    ),
+                    stop_reason="end_turn",
+                )
+            )
+
+    store = InMemorySessionStore()
+    application = AgentApplication(
+        EmptyThinkingProvider(),
+        ToolDispatcher(ToolCatalog({})),
+        store,
+    )
+
+    events = [event async for event in application.run("hello")]
+
+    thinking_events = (ThinkingStarted, ThinkingDelta, ThinkingFinished)
+    assert not any(isinstance(e, thinking_events) for e in events)
 
 
 @pytest.mark.asyncio

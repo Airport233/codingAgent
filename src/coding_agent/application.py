@@ -227,6 +227,7 @@ class AgentApplication:
             else:
                 request_history = self._conversation.snapshot()
             thinking_active = False
+            thinking_seen_live = False
             try:
                 async for event in self._provider.stream(
                     request_history,
@@ -234,6 +235,7 @@ class AgentApplication:
                     system_instructions,
                 ):
                     if isinstance(event, ProviderThinkingDelta):
+                        thinking_seen_live = True
                         if not thinking_active:
                             thinking_active = True
                             yield ThinkingStarted()
@@ -246,10 +248,14 @@ class AgentApplication:
                     elif isinstance(event, ProviderResponseFinished):
                         response = event.exchange
             except asyncio.CancelledError:
+                if thinking_active:
+                    yield ThinkingFinished()
                 await self._sessions.append("turn_cancelled", {"phase": "provider_request"})
                 yield AgentCancelled(message="Provider request cancelled")
                 return
             except Exception as error:
+                if thinking_active:
+                    yield ThinkingFinished()
                 message = self._redacted_text(error)
                 await self._sessions.append(
                     "turn_failed", {"phase": "provider_request", "message": message}
@@ -259,12 +265,20 @@ class AgentApplication:
 
             if thinking_active:
                 yield ThinkingFinished()
-            elif response is not None and any(
-                isinstance(block, (ThinkingBlock, RedactedThinkingBlock))
-                for block in response.blocks
-            ):
-                yield ThinkingStarted()
-                yield ThinkingFinished()
+            elif not thinking_seen_live and response is not None:
+                recovered_thinking = "".join(
+                    block.thinking
+                    for block in response.blocks
+                    if isinstance(block, ThinkingBlock)
+                )
+                has_redacted_thinking = any(
+                    isinstance(block, RedactedThinkingBlock) for block in response.blocks
+                )
+                if recovered_thinking or has_redacted_thinking:
+                    yield ThinkingStarted()
+                    if recovered_thinking:
+                        yield ThinkingDelta(text=recovered_thinking)
+                    yield ThinkingFinished()
 
             if response is None:
                 message = "Provider response ended without a completed exchange"

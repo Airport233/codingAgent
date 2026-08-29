@@ -57,3 +57,23 @@ Recorded on 2026-08-28 for follow-up on `feature/cli-hardening`:
 - Resolved on `feature/cli-hardening`: projected history now wraps the summary in an explicit
   codingAgent-generated checkpoint marker. Request-shape tests, rather than model self-reporting,
   remain the acceptance evidence for compaction.
+
+Recorded on 2026-08-29, unresolved:
+
+- Provider stream failures are not diagnosable. When an endpoint closes the SSE stream without
+  sending `message_stop`, `AnthropicStreamAggregator` never emits `ProviderResponseFinished`, no
+  exception is raised, and `application.py:269` reports only
+  `Provider response ended without a completed exchange`. The message carries no HTTP status, no
+  response body and no endpoint identity, so it is indistinguishable from a wrong model name, an
+  out-of-quota endpoint and a genuinely protocol-incompatible Provider. This fails the error-message
+  rule in `docs/requirements.md` ("错误信息应包含操作类型、可恢复性和建议动作"): it states neither
+  recoverability nor a suggested action. `providers/anthropic.py:65` is the only layer that still
+  holds the HTTP response context and is therefore where the detail must be captured. Any fix must
+  satisfy NFR-SEC-003 and redact credentials, auth headers and private endpoints, which is precisely
+  why the current message was written to be contentless.
+- Troubleshooting note for the above: check the environment before suspecting the Provider.
+  `CODING_AGENT_BASE_URL` and `CODING_AGENT_API_KEY` take precedence over the user-level
+  `config.toml` at `runtime.py:137` and `runtime.py:143`, so a configured provider profile can be
+  silently overridden and the request can reach an entirely different endpoint than the one the
+  session log's `model_changed` event implies. The session log deliberately does not record the base
+  URL, so this override is invisible in the transcript.
