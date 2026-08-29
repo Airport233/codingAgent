@@ -96,7 +96,8 @@ class SkillInstaller:
         if not new:
             return InstallResult(
                 (),
-                "Command succeeded but no new skill directories were detected.",
+                "No new skills added — they may already be installed. "
+                "Use /skills to see what's available.",
                 tuple(output_lines),
             )
 
