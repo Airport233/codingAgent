@@ -691,6 +691,74 @@ async def test_repl_shows_and_switches_approval_mode() -> None:
 
 
 @pytest.mark.asyncio
+async def test_repl_lists_skills_and_reports_usage_errors() -> None:
+    from coding_agent.skills import SkillLoader
+
+    skills = SkillLoader.default().load()
+    application = AgentApplication(
+        FakeProvider([]),
+        ToolDispatcher(ToolCatalog({})),
+        InMemorySessionStore(),
+        skills=skills,
+    )
+    inputs: Iterator[str] = iter(("/skills", "/skill", "/skill nonexistent do thing", "/exit"))
+    output: list[str] = []
+
+    async def read_input() -> str:
+        return next(inputs)
+
+    await run_repl(application, read_input=read_input, write_output=output.append)
+
+    rendered = "".join(output)
+    assert "Skills:" in rendered
+    assert "test-fix" in rendered
+    assert "Usage: /skill <name> <task>" in rendered
+
+
+@pytest.mark.asyncio
+async def test_repl_reports_skill_install_without_npx(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil as _shutil
+
+    monkeypatch.setattr(_shutil, "which", lambda _cmd: None)
+    application = AgentApplication(
+        FakeProvider([]),
+        ToolDispatcher(ToolCatalog({})),
+        InMemorySessionStore(),
+    )
+    inputs: Iterator[str] = iter(("/skill install owner/repo", "/exit"))
+    output: list[str] = []
+
+    async def read_input() -> str:
+        return next(inputs)
+
+    await run_repl(
+        application,
+        read_input=read_input,
+        write_output=output.append,
+        workspace=str(tmp_path),
+    )
+
+    rendered = "".join(output)
+    assert "npx is not installed" in rendered
+
+
+@pytest.mark.asyncio
+async def test_close_session_is_idempotent() -> None:
+    store = InMemorySessionStore()
+    application = AgentApplication(
+        FakeProvider([]),
+        ToolDispatcher(ToolCatalog({})),
+        store,
+    )
+    await application.close_session()
+    assert store.kinds[-1] == "session_closed"
+    await application.close_session()
+    assert store.kinds[-1] == "session_closed"
+
+
+@pytest.mark.asyncio
 async def test_repl_hides_thinking_content_by_default() -> None:
     provider = FakeProvider(
         [
