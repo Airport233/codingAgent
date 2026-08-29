@@ -1194,15 +1194,19 @@ class CodingAgentTui(App[None]):
             await self._notice(f"Skill not found: {name}.", "warning")
 
     async def action_cancel_turn(self) -> None:
-        if self._turn_worker is not None and self._turn_worker.is_running:
-            self._turn_worker.cancel()
-            return
+        # Check for text selection FIRST — copy takes priority over cancel.
+        # When the user has selected text (e.g. tool output they want to
+        # copy), Ctrl+C should copy, not cancel the running task.
         selected_text = self.screen.get_selected_text()
         if isinstance(self.focused, TextArea) and self.focused.selected_text:
             selected_text = self.focused.selected_text
         if selected_text:
             self.copy_to_clipboard(selected_text)
             await _copy_to_macos_clipboard(selected_text)
+            return
+        # No selection — cancel the running task if there is one.
+        if self._turn_worker is not None and self._turn_worker.is_running:
+            self._turn_worker.cancel()
 
     async def action_quit_agent(self) -> None:
         if self._turn_worker is not None and self._turn_worker.is_running:
