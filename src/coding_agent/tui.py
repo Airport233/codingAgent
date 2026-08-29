@@ -21,7 +21,7 @@ from textual.widgets.option_list import Option
 from textual.worker import Worker
 
 from coding_agent.application import AgentApplication
-from coding_agent.approval import ApprovalDecision
+from coding_agent.approval import ApprovalDecision, ApprovalMode
 from coding_agent.domain import (
     AssistantExchange,
     CompactionRecord,
@@ -77,6 +77,7 @@ class SlashCommand:
 SLASH_COMMANDS = (
     SlashCommand("help", "Show available commands"),
     SlashCommand("model", "Show or choose a model", "[provider/model]"),
+    SlashCommand("mode", "Show or set approval mode", "[auto|ask|deny]"),
     SlashCommand("context", "Show context usage"),
     SlashCommand("compact", "Compact conversation context"),
     SlashCommand("thinking", "Toggle thinking details"),
@@ -332,6 +333,9 @@ class ApprovalScreen(Screen[tuple[str, ApprovalDecision]]):
         self.dismiss((self.request.request_id, "deny"))
 
 
+_MODE_CYCLE: tuple[ApprovalMode, ...] = ("auto", "ask", "deny")
+
+
 class CodingAgentTui(App[None]):
     CSS_PATH = "tui.tcss"
     TITLE = "codingAgent"
@@ -340,6 +344,7 @@ class CodingAgentTui(App[None]):
         Binding("ctrl+c,super+c", "cancel_turn", "Cancel / copy", show=True, priority=True),
         Binding("ctrl+q", "quit_agent", "Quit", show=True),
         Binding("ctrl+t", "toggle_thinking", "Thinking", show=True),
+        Binding("shift+tab", "cycle_approval_mode", "Mode", show=True, priority=True),
     ]
 
     def __init__(
@@ -407,6 +412,7 @@ class CodingAgentTui(App[None]):
         self.query_one("#completion-popup", Vertical).display = False
         await self._render_recovered_history()
         self._refresh_session_metadata()
+        self._update_mode_indicator()
         self.query_one("#composer", PromptTextArea).focus()
 
     @on(PromptTextArea.Submitted, "#composer")
@@ -665,6 +671,22 @@ class CodingAgentTui(App[None]):
     async def _command(self, prompt: str) -> None:
         if prompt == "/help":
             await self._notice(format_slash_help(), "info")
+        elif prompt == "/mode":
+            current = self.application.approval_mode()
+            message = (
+                f"Approval mode: {current}" if current is not None else "Approval mode: unavailable"
+            )
+            await self._notice(message, "info")
+        elif prompt.startswith("/mode "):
+            target = prompt.removeprefix("/mode ").strip()
+            if target not in _MODE_CYCLE:
+                await self._notice("Usage: /mode auto|ask|deny", "error")
+                return
+            if not self.application.set_approval_mode(cast(ApprovalMode, target)):
+                await self._notice("Approval mode cannot be changed for this session.", "error")
+                return
+            self._update_mode_indicator()
+            await self._notice(f"Approval mode switched to {target}.", "info")
         elif prompt == "/model":
             choices = ", ".join(self.available_models) or self.model
             await self._notice(f"Model: {self.model}\nAvailable: {choices}", "info")
@@ -778,6 +800,7 @@ class CodingAgentTui(App[None]):
         self.query_one("#status-context", Label).update(self._context_label())
         self.query_one("#brand", Static).update(self._welcome_text())
         self._refresh_session_metadata()
+        self._update_mode_indicator()
 
     def _resume_selected(self, session_id: str | None) -> None:
         if session_id is None:
@@ -985,6 +1008,20 @@ class CodingAgentTui(App[None]):
             self._thinking[0].collapsed = not self.thinking_visible
         state = "shown" if self.thinking_visible else "hidden"
         await self._notice(f"Thinking details: {state}.", "info")
+
+    async def action_cycle_approval_mode(self) -> None:
+        current = self.application.approval_mode()
+        if current is None:
+            await self._notice("Approval mode cannot be changed for this session.", "warning")
+            return
+        next_mode = _MODE_CYCLE[(_MODE_CYCLE.index(current) + 1) % len(_MODE_CYCLE)]
+        self.application.set_approval_mode(next_mode)
+        self._update_mode_indicator()
+        await self._notice(f"Approval mode switched to {next_mode}.", "info")
+
+    def _update_mode_indicator(self) -> None:
+        mode = self.application.approval_mode()
+        self.query_one("#composer", PromptTextArea).border_title = f"mode: {mode}" if mode else ""
 
     async def action_cancel_turn(self) -> None:
         if self._turn_worker is not None and self._turn_worker.is_running:

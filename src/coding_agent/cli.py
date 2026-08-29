@@ -4,12 +4,13 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, cast
 
 import typer
 from rich.console import Console
 
 from coding_agent.application import AgentApplication
+from coding_agent.approval import ApprovalMode
 from coding_agent.events import (
     AgentCancelled,
     AgentCompleted,
@@ -102,6 +103,20 @@ async def run_repl(
             return
         if prompt == "/help":
             write_output(format_slash_help() + "\n")
+            continue
+        if prompt == "/mode":
+            current = application.approval_mode()
+            write_output(f"Approval mode: {current or 'unavailable'}\n")
+            continue
+        if prompt.startswith("/mode "):
+            target = prompt.removeprefix("/mode ").strip()
+            if target not in {"auto", "ask", "deny"}:
+                write_output("Usage: /mode auto|ask|deny\n")
+                continue
+            if not application.set_approval_mode(cast(ApprovalMode, target)):
+                write_output("Approval mode cannot be changed for this session.\n")
+                continue
+            write_output(f"Approval mode switched to {target}.\n")
             continue
         if prompt == "/model":
             choices = ", ".join(available_models) or model
