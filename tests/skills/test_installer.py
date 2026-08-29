@@ -1,41 +1,43 @@
 from __future__ import annotations
 
+import asyncio
 import shutil
 from pathlib import Path
 
 import pytest
 
-from coding_agent.skills.installer import SkillInstaller
+from coding_agent.skills.installer import InstallResult, SkillInstaller
 
 
-def _make_skill_repo(repo_dir: Path, name: str) -> None:
-    skill_dir = repo_dir / name
-    skill_dir.mkdir(parents=True)
+def _make_skill(directory: Path, name: str) -> None:
+    skill_dir = directory / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(
         f"---\nname: {name}\ndescription: Test skill {name}\n---\n\nBody for {name}.\n",
         encoding="utf-8",
     )
 
 
+async def _consume_install(installer: SkillInstaller, source: str) -> InstallResult | None:
+    result: InstallResult | None = None
+    async for item in installer.install(source):
+        if isinstance(item, InstallResult):
+            result = item
+    return result
+
+
 def test_uninstall_removes_a_skill_from_project_dir(tmp_path: Path) -> None:
     project_dir = tmp_path / ".agents" / "skills"
     project_dir.mkdir(parents=True)
-    _make_skill_repo(project_dir, "demo")
+    _make_skill(project_dir, "demo")
 
     installer = SkillInstaller(
         user_dir=tmp_path / "user" / "skills",
         project_dir=project_dir,
     )
 
-    removed = pytest.run_sync(installer.uninstall("demo")) if hasattr(pytest, "run_sync") else True
-    # installer.uninstall is async; use asyncio directly
-    import asyncio
-
-    removed = asyncio.run(installer.uninstall("demo"))
-    assert removed is True
+    assert asyncio.run(installer.uninstall("demo")) is True
     assert not (project_dir / "demo").exists()
-
-    # Second uninstall returns False
     assert asyncio.run(installer.uninstall("demo")) is False
 
 
@@ -47,13 +49,11 @@ def test_reload_picks_up_newly_added_skills(tmp_path: Path) -> None:
     installer = SkillInstaller(user_dir=user_dir, project_dir=project_dir)
 
     snapshot = installer.reload()
-    project_names = {s.name for s in snapshot.skills if s.source == "project"}
-    assert project_names == set()
+    assert {s.name for s in snapshot.skills if s.source == "project"} == set()
 
-    _make_skill_repo(project_dir, "demo")
+    _make_skill(project_dir, "demo")
     snapshot = installer.reload()
-    project_names = {s.name for s in snapshot.skills if s.source == "project"}
-    assert project_names == {"demo"}
+    assert {s.name for s in snapshot.skills if s.source == "project"} == {"demo"}
 
 
 def test_existing_skill_names_scans_both_dirs(tmp_path: Path) -> None:
@@ -61,12 +61,11 @@ def test_existing_skill_names_scans_both_dirs(tmp_path: Path) -> None:
     user_dir = tmp_path / "user" / "skills"
     project_dir.mkdir(parents=True)
     user_dir.mkdir(parents=True)
-    _make_skill_repo(project_dir, "proj-skill")
-    _make_skill_repo(user_dir, "user-skill")
+    _make_skill(project_dir, "proj-skill")
+    _make_skill(user_dir, "user-skill")
 
     installer = SkillInstaller(user_dir=user_dir, project_dir=project_dir)
-    names = installer._existing_skill_names()
-    assert names == {"proj-skill", "user-skill"}
+    assert installer._existing_skill_names() == {"proj-skill", "user-skill"}
 
 
 def test_install_returns_error_without_npx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -76,8 +75,71 @@ def test_install_returns_error_without_npx(tmp_path: Path, monkeypatch: pytest.M
         project_dir=tmp_path / ".agents" / "skills",
     )
 
-    import asyncio
-
-    result = asyncio.run(installer.install("owner/repo"))
+    result = asyncio.run(_consume_install(installer, "owner/repo"))
+    assert result is not None
     assert result.installed == ()
     assert "npx is not installed" in result.message
+
+
+def test_install_streams_output_and_detects_new_skills(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mock npx to verify the streaming + detection logic without Node.js."""
+    project_dir = tmp_path / ".agents" / "skills"
+    project_dir.mkdir(parents=True)
+
+    class _FakeStream:
+        def __init__(self, lines: list[bytes]) -> None:
+            self._lines = list(lines)
+
+        async def __aiter__(self):
+            for line in self._lines:
+                yield line
+
+    class _FakeProcess:
+        def __init__(self, exit_code: int, project_dir: Path) -> None:
+            self.returncode: int | None = None
+            self._exit_code = exit_code
+            self._project_dir = project_dir
+            self.stdout = _FakeStream([b"Adding skill demo\n", b"Done\n"])
+
+        async def wait(self) -> int:
+            # Simulate npx writing the skill directory before exiting
+            _make_skill(self._project_dir, "demo")
+            self.returncode = self._exit_code
+            return self._exit_code
+
+        def kill(self) -> None:
+            pass
+
+    async def _fake_create_subprocess_exec(*args: str, **kwargs):
+        del args, kwargs
+        return _FakeProcess(0, project_dir)
+
+    monkeypatch.setattr(shutil, "which", lambda _cmd: "/fake/npx")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    installer = SkillInstaller(
+        user_dir=tmp_path / "user" / "skills",
+        project_dir=project_dir,
+    )
+
+    items = []
+    result = asyncio.run(_collect_all(installer, "owner/repo", items))
+    assert result is not None
+    assert result.installed == ("demo",)
+    # Progress lines were streamed
+    assert len(items) >= 2
+    assert any("Adding skill" in line for line in items)
+
+
+async def _collect_all(
+    installer: SkillInstaller, source: str, lines: list[str]
+) -> InstallResult | None:
+    result: InstallResult | None = None
+    async for item in installer.install(source):
+        if isinstance(item, tuple):
+            lines.append(item[0])
+        else:
+            result = item
+    return result

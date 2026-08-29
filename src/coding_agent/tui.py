@@ -54,7 +54,7 @@ from coding_agent.events import (
 from coding_agent.runtime import RuntimeConfigurationError
 from coding_agent.sessions.jsonl import SessionSummary
 from coding_agent.skills import format_skill_list
-from coding_agent.skills.installer import SkillInstaller
+from coding_agent.skills.installer import InstallResult, SkillInstaller
 
 
 @dataclass(frozen=True, slots=True)
@@ -1141,9 +1141,19 @@ class CodingAgentTui(App[None]):
         )
 
     async def _install_skill(self, source: str) -> None:
-        await self._notice(f"Installing skills from {source}...", "info")
+        progress_label = f"Installing skills from {source}..."
+        progress = Static(progress_label, markup=False, classes="message notice info")
+        await self._mount(progress)
         installer = self._make_installer()
-        result = await installer.install(source)
+        result: InstallResult | None = None
+        async for item in installer.install(source):
+            if isinstance(item, tuple):
+                progress.update(f"{progress_label}\n{item[0]}")
+            else:
+                result = item
+        if result is None:
+            result = InstallResult((), "Install produced no result.")
+        progress.remove()
         if result.installed:
             new_skills = installer.reload()
             self.application.reload_skills(new_skills)
