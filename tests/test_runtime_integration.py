@@ -32,6 +32,7 @@ from coding_agent.events import (
     ThinkingDelta,
     ThinkingFinished,
     ThinkingStarted,
+    ToolFinished,
     ToolStarted,
     WarningRaised,
 )
@@ -267,6 +268,164 @@ async def test_explicit_workspace_limits_tools_inside_a_parent_git_repository(
     expected_project_key = hashlib.sha256(normalized_workspace.encode()).hexdigest()[:24]
     session_file = next((tmp_path / "data" / "sessions").rglob("*.jsonl"))
     assert session_file.parent.name == expected_project_key
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_never_blocks_a_flagged_shell_command_but_warns(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "project"
+    (workspace / "doomed").mkdir(parents=True)
+    settings = RuntimeSettings.from_environment(
+        workspace=workspace,
+        model="example-model",
+        environ={
+            "CODING_AGENT_BASE_URL": "https://example.invalid/anthropic",
+            "CODING_AGENT_API_KEY": "private-test-credential",
+        },
+        data_root=tmp_path / "data",
+        approval_mode="auto",
+    )
+    provider = FakeProvider(
+        [
+            AssistantExchange(
+                (ToolUseBlock("call-1", "shell", {"command": "rm -rf doomed"}),), "tool_use"
+            ),
+            AssistantExchange((TextBlock("done"),), "end_turn"),
+        ]
+    )
+
+    runtime = await create_runtime(settings, provider=provider)
+    try:
+        events = [event async for event in runtime.application.run("clean up")]
+    finally:
+        await runtime.aclose()
+
+    assert not any(isinstance(event, ApprovalRequested) for event in events)
+    assert any(isinstance(event, WarningRaised) for event in events)
+    finished = next(event for event in events if isinstance(event, ToolFinished))
+    assert finished.is_error is False
+    assert not (workspace / "doomed").exists()
+
+
+@pytest.mark.asyncio
+async def test_deny_mode_blocks_a_flagged_shell_command_without_asking_or_warning(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "project"
+    (workspace / "doomed").mkdir(parents=True)
+    settings = RuntimeSettings.from_environment(
+        workspace=workspace,
+        model="example-model",
+        environ={
+            "CODING_AGENT_BASE_URL": "https://example.invalid/anthropic",
+            "CODING_AGENT_API_KEY": "private-test-credential",
+        },
+        data_root=tmp_path / "data",
+        approval_mode="deny",
+    )
+    provider = FakeProvider(
+        [
+            AssistantExchange(
+                (ToolUseBlock("call-1", "shell", {"command": "rm -rf doomed"}),), "tool_use"
+            ),
+            AssistantExchange((TextBlock("done"),), "end_turn"),
+        ]
+    )
+
+    runtime = await create_runtime(settings, provider=provider)
+    try:
+        events = [event async for event in runtime.application.run("clean up")]
+    finally:
+        await runtime.aclose()
+
+    assert not any(isinstance(event, ApprovalRequested) for event in events)
+    assert not any(isinstance(event, WarningRaised) for event in events)
+    finished = next(event for event in events if isinstance(event, ToolFinished))
+    assert finished.is_error is True
+    assert finished.metadata == {"denied": True}
+    assert (workspace / "doomed").exists()
+
+
+@pytest.mark.asyncio
+async def test_configured_rule_still_denies_under_auto_mode(tmp_path: Path) -> None:
+    workspace = tmp_path / "project"
+    (workspace / "doomed").mkdir(parents=True)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[permissions.shell_rules]\n"rm -rf doomed" = "deny"\n', encoding="utf-8"
+    )
+    settings = RuntimeSettings.load(
+        workspace=workspace,
+        model="example-model",
+        environ={
+            "CODING_AGENT_BASE_URL": "https://example.invalid/anthropic",
+            "CODING_AGENT_API_KEY": "private-test-credential",
+        },
+        data_root=tmp_path / "data",
+        config_path=config_path,
+        approval_mode="auto",
+    )
+    provider = FakeProvider(
+        [
+            AssistantExchange(
+                (ToolUseBlock("call-1", "shell", {"command": "rm -rf doomed"}),), "tool_use"
+            ),
+            AssistantExchange((TextBlock("done"),), "end_turn"),
+        ]
+    )
+
+    runtime = await create_runtime(settings, provider=provider)
+    try:
+        events = [event async for event in runtime.application.run("clean up")]
+    finally:
+        await runtime.aclose()
+
+    assert not any(isinstance(event, ApprovalRequested) for event in events)
+    finished = next(event for event in events if isinstance(event, ToolFinished))
+    assert finished.is_error is True
+    assert finished.metadata == {"denied": True}
+    assert (workspace / "doomed").exists()
+
+
+@pytest.mark.asyncio
+async def test_configured_rule_still_allows_under_deny_mode(tmp_path: Path) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir(parents=True)
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[permissions.shell_rules]\n"echo hello" = "allow"\n', encoding="utf-8"
+    )
+    settings = RuntimeSettings.load(
+        workspace=workspace,
+        model="example-model",
+        environ={
+            "CODING_AGENT_BASE_URL": "https://example.invalid/anthropic",
+            "CODING_AGENT_API_KEY": "private-test-credential",
+        },
+        data_root=tmp_path / "data",
+        config_path=config_path,
+        approval_mode="deny",
+    )
+    provider = FakeProvider(
+        [
+            AssistantExchange(
+                (ToolUseBlock("call-1", "shell", {"command": "echo hello"}),), "tool_use"
+            ),
+            AssistantExchange((TextBlock("done"),), "end_turn"),
+        ]
+    )
+
+    runtime = await create_runtime(settings, provider=provider)
+    try:
+        events = [event async for event in runtime.application.run("say hi")]
+    finally:
+        await runtime.aclose()
+
+    assert not any(isinstance(event, ApprovalRequested) for event in events)
+    finished = next(event for event in events if isinstance(event, ToolFinished))
+    assert finished.is_error is False
+    assert finished.metadata.get("denied") is not True
 
 
 @pytest.mark.asyncio
@@ -578,7 +737,6 @@ async def test_shell_classifier_logs_a_classification_event_for_every_shell_call
         tier="elevated",
         matched_rule=None,
         escapes_workspace=False,
-        touches_sensitive_path=False,
         reason="matches a built-in destructive-command pattern",
         forced_action="ask",
     )

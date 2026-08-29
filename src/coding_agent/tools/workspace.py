@@ -12,8 +12,6 @@ from coding_agent.tools.base import RecoverableToolError
 
 
 class WorkspaceGuard:
-    _PROTECTED_DIRECTORY_NAMES = frozenset({".git", ".coding-agent"})
-
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
 
@@ -24,15 +22,6 @@ class WorkspaceGuard:
         resolved = (self.root / requested).resolve()
         if not resolved.is_relative_to(self.root):
             raise RecoverableToolError("Path is outside the workspace")
-        return resolved
-
-    def resolve_for_write(self, requested_path: str) -> Path:
-        resolved = self.resolve(requested_path)
-        relative = resolved.relative_to(self.root)
-        if any(part.casefold() in self._PROTECTED_DIRECTORY_NAMES for part in relative.parts):
-            raise RecoverableToolError("Path is protected from writes")
-        if relative.name.casefold() == ".env" or relative.name.casefold().startswith(".env."):
-            raise RecoverableToolError("Credential files are protected from writes")
         return resolved
 
 

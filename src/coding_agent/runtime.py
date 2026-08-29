@@ -309,7 +309,14 @@ async def create_runtime(
 
     def approval_override(call: ToolUseBlock) -> ApprovalAction | None:
         verdict = classify_tool_call(call)
-        return verdict.forced_action if verdict is not None else None
+        if verdict is None or verdict.matched_rule is None:
+            # Built-in heuristics (workspace escape, destructive-command patterns)
+            # never override the approval decision -- auto must never be escalated
+            # into a prompt, and deny must never be relaxed into one. Only an
+            # explicit, user-authored rule in [permissions.shell_rules] may
+            # override approval_mode in either direction.
+            return None
+        return verdict.forced_action
 
     catalog = await ToolCatalog.create(
         (
