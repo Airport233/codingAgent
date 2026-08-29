@@ -27,7 +27,11 @@ class ActivateSkillTool:
         if skill is None:
             raise RecoverableToolError(f"Unknown skill: {parsed.name}")
         return ToolOutput(
-            f"Activated {skill.name}; its SKILL.md instructions will be loaded next.",
+            f"Activated {skill.name}. Its full instructions are now in your system "
+            "prompt for this and subsequent turns — follow them directly. "
+            "Do NOT read SKILL.md via read_skill_resource or read_file; it is already "
+            "loaded. Use read_skill_resource only for files inside references/, "
+            "scripts/, or assets/ when the instructions tell you to.",
             {"skill_name": skill.name, "source": skill.source},
         )
 
