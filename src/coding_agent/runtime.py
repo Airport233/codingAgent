@@ -121,7 +121,7 @@ class RuntimeSettings:
             max_tokens, model_config.get("max_output_tokens"), 4096, "max output tokens"
         )
         resolved_max_steps = _configured_int(
-            max_steps, general.get("max_agent_steps"), 20, "max agent steps"
+            max_steps, general.get("max_agent_steps"), 200, "max agent steps"
         )
         resolved_context_window = _configured_int(
             context_window, model_config.get("context_window"), 200_000, "context window"
