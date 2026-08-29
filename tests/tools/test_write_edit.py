@@ -153,7 +153,53 @@ async def test_mkdir_is_recursive_and_idempotent(
     assert "already exists" in result.content.lower()
 
 
-def test_workspace_guard_rejects_escape_and_atomic_failure_preserves_original(
+@pytest.mark.asyncio
+async def test_edit_does_not_require_reread_between_consecutive_edits(
+    workspace: Path,
+) -> None:
+    """Regression: refresh_after_write used to clear visible_ranges to empty,
+    forcing a re-read before the next edit to the same file. Agents that
+    forgot to re-read hit 'Requested edit range was not read' repeatedly,
+    causing read-edit loops. After the fix, a second edit to the same file
+    works without an intervening read_file."""
+    target = workspace / "consecutive.txt"
+    target.write_text("line1\nline2\nline3\nline4\nline5\n", encoding="utf-8")
+    read_set = ReadSet()
+    reader = ReadFileTool(workspace, read_set=read_set)
+    editor = EditFileTool(workspace, read_set)
+
+    # Read the whole file first.
+    await reader.execute(ReadFileInput(path="consecutive.txt"))
+
+    # First edit: replace line 2.
+    result1 = await editor.execute(
+        EditFileInput(
+            path="consecutive.txt",
+            start_line=2,
+            end_line=2,
+            expected_content="line2",
+            replacement="LINE2",
+        )
+    )
+    assert "Updated" in result1.content
+
+    # Second edit: replace line 4 — without re-reading.
+    # Before the fix, this raised "Requested edit range was not read".
+    result2 = await editor.execute(
+        EditFileInput(
+            path="consecutive.txt",
+            start_line=4,
+            end_line=4,
+            expected_content="line4",
+            replacement="LINE4",
+        )
+    )
+    assert "Updated" in result2.content
+    assert target.read_text(encoding="utf-8") == "line1\nLINE2\nline3\nLINE4\nline5\n"
+
+
+@pytest.mark.asyncio
+async def test_workspace_guard_rejects_escape_and_atomic_failure_preserves_original(
     workspace: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

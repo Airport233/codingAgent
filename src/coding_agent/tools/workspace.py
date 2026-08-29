@@ -102,18 +102,29 @@ class ReadSet:
         return observation
 
     def refresh_after_write(self, path: Path, raw: bytes) -> None:
+        """Update the observation after a write/edit to reflect the new file state.
+
+        Instead of clearing ``visible_ranges`` to empty (which forces a re-read
+        before the next edit to the same file — a common cause of agent
+        read-edit loops), we expand the visible range to cover the entire file.
+        This is accurate because the caller just wrote the complete file content
+        via ``raw``, so the entire file state is known.
+        """
         resolved = path.resolve()
         current = self._entries.get(resolved)
         if current is None:
             return
         stat = resolved.stat()
+        line_count = raw.count(b"\n")
+        if line_count == 0 and len(raw) > 0:
+            line_count = 1
         self._entries[resolved] = replace(
             current,
             sha256=hashlib.sha256(raw).hexdigest(),
             size=len(raw),
             mtime_ns=stat.st_mtime_ns,
             read_at=datetime.now(UTC),
-            visible_ranges=(),
+            visible_ranges=((1, line_count),),
         )
 
 
