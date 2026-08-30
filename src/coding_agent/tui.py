@@ -750,10 +750,11 @@ class CodingAgentTui(App[None]):
     async def _tool_started(self, event: ToolStarted) -> None:
         details = _tool_arguments(event.arguments)
         body = Static(details, markup=False, classes="tool-body")
+        expand = event.tool_name in ("edit_file", "write_file")
         panel = Collapsible(
             body,
             title=Content(f"● {_tool_title(event)} · running"),
-            collapsed=True,
+            collapsed=not expand,
             classes="tool-card running",
         )
         self._tools[event.call_id] = (
@@ -1135,10 +1136,11 @@ class CodingAgentTui(App[None]):
         body = Static(rendered, markup=False, classes="tool-body")
         failed = result is None or result.is_error
         status = "interrupted" if result is None else ("error" if result.is_error else "done")
+        expand = call.name in ("edit_file", "write_file")
         panel = Collapsible(
             body,
             title=Content(f"{'✕' if failed else '✓'} {title} · {status}"),
-            collapsed=True,
+            collapsed=not expand,
             classes="tool-card failed" if failed else "tool-card succeeded",
         )
         await self._mount(panel)
