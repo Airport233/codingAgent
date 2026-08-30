@@ -47,12 +47,19 @@ pytestmark = pytest.mark.asyncio
 
 def _widget_text(widget: object) -> str:
     """Extract text from a Static, handling both plain strings and Rich renderables."""
+    from io import StringIO
+    from rich.console import Console
+
     content = getattr(widget, "_Static__content", None)
     if content is None:
         return str(widget)
+    if isinstance(content, str):
+        return content
     if hasattr(content, "markup"):
         return content.markup
-    return str(content)
+    buf = StringIO()
+    Console(file=buf, force_terminal=False, width=200, highlight=False).print(content, end="")
+    return buf.getvalue()
 
 
 async def test_slash_help_uses_one_aligned_command_per_line() -> None:
@@ -896,9 +903,9 @@ async def test_tui_renders_collapsible_thinking_and_completed_tool_card() -> Non
         assert "uv run pytest" in title_text
         assert "[tests]" in title_text
         assert "done" in title_text
-        assert '"command": "uv run pytest"' in str(tool.query_one(".tool-body").render())
-        assert "Result:" in str(tool.query_one(".tool-body").render())
-        assert "all green" in str(tool.query_one(".tool-body").render())
+        tool_body = _widget_text(tool.query_one(".tool-body"))
+        assert "uv run pytest" in tool_body
+        assert "all green" in tool_body
 
 
 async def test_tui_replays_full_history_with_compaction_boundary_and_tool_inputs() -> None:

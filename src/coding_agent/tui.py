@@ -18,7 +18,10 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.timer import Timer
+from rich.console import Group as RichGroup
 from rich.markdown import Markdown as RichMarkdown
+from rich.syntax import Syntax as RichSyntax
+from rich.text import Text as RichText
 from textual.content import Content
 from textual.widgets import Collapsible, Footer, Label, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
@@ -434,7 +437,7 @@ class CodingAgentTui(App[None]):
         self._assistant_text = ""
         self._thinking: tuple[Collapsible, Static] | None = None
         self._thinking_text = ""
-        self._tools: dict[str, tuple[Collapsible, Static, str, str]] = {}
+        self._tools: dict[str, tuple[Collapsible, Static, str, str, str, dict[str, object]]] = {}
         self._completion_mode: Literal["commands", "models", "skills"] | None = None
         self._completion_matches: list[str] = []
         self._dismissed_completion_value: str | None = None
@@ -753,18 +756,20 @@ class CodingAgentTui(App[None]):
             collapsed=True,
             classes="tool-card running",
         )
-        self._tools[event.call_id] = (panel, body, _tool_title(event), details)
+        self._tools[event.call_id] = (
+            panel, body, _tool_title(event), details, event.tool_name, event.arguments,
+        )
         await self._mount(panel)
 
     def _tool_finished(self, event: ToolFinished) -> None:
         item = self._tools.get(event.call_id)
         if item is None:
             return
-        panel, body, title, details = item
+        panel, body, title, details, tool_name, tool_args = item
         panel.title = Content(f"{'✓' if not event.is_error else '✕'} {title} · {event.status}")
         panel.remove_class("running")
         panel.add_class("failed" if event.is_error else "succeeded")
-        body.update(_tool_body(details, event.content))
+        body.update(_render_tool_body(tool_name, tool_args, event.content))
 
     async def _command(self, prompt: str) -> None:
         if prompt == "/help":
@@ -1125,9 +1130,9 @@ class CodingAgentTui(App[None]):
     ) -> None:
         started = ToolStarted(call.call_id, call.name, call.input)
         title = _tool_title(started)
-        details = _tool_arguments(call.input)
         content = "interrupted before result" if result is None else result.content
-        body = Static(_tool_body(details, content), markup=False, classes="tool-body")
+        rendered = _render_tool_body(call.name, call.input, content)
+        body = Static(rendered, markup=False, classes="tool-body")
         failed = result is None or result.is_error
         status = "interrupted" if result is None else ("error" if result.is_error else "done")
         panel = Collapsible(
@@ -1238,6 +1243,27 @@ def _render_assistant_content(text: str) -> Static:
     if _has_markdown_formatting(text):
         return Static(RichMarkdown(text), classes="message assistant-message")
     return Static(text, markup=False, classes="message assistant-message")
+
+
+def _render_tool_body(
+    tool_name: str, arguments: dict[str, object], result: str
+) -> object:
+    """Return a Rich renderable for the tool body. Shell tools get syntax highlighting."""
+    args_text = _tool_arguments(arguments)
+    result_text = _preview_text(result or "(no output)", 12_000)
+    if tool_name == "shell":
+        command = arguments.get("command")
+        parts: list[object] = []
+        if isinstance(command, str):
+            parts.append(RichText("Command:", style="bold"))
+            parts.append(RichSyntax(command, "bash", theme="monokai", padding=(0, 1)))
+        else:
+            parts.append(RichText(args_text, style="dim"))
+        parts.append(RichText(""))
+        parts.append(RichText("Result:", style="bold"))
+        parts.append(RichText(result_text))
+        return RichGroup(*parts)
+    return f"{args_text}\n\nResult:\n{result_text}"
 
 
 def _tool_title(event: ToolStarted) -> str:
