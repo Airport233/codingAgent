@@ -26,7 +26,7 @@ from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.timer import Timer
 from textual.widget import Widget
-from textual.widgets import Footer, Label, OptionList, Static, TextArea
+from textual.widgets import Footer, Label, OptionList, Rule, Static, TextArea
 from textual.widgets.option_list import Option
 from textual.worker import Worker
 
@@ -735,9 +735,7 @@ class CodingAgentTui(App[None]):
         if self._turn_worker is not None and self._turn_worker.is_running:
             await self._notice("A turn is already running. Press Ctrl+C to cancel it.", "warning")
             return
-        await self._mount(
-            Static(prompt, markup=False, classes="message user-message"), force_scroll=True
-        )
+        await self._mount(_render_user_message(prompt), force_scroll=True)
         self._prompt_history.append(history_prompt or prompt)
         self._history_index = None
         self._last_history_text = None
@@ -1349,9 +1347,7 @@ class CodingAgentTui(App[None]):
 
     async def _render_recovered_exchange(self, exchange: ConversationExchange) -> None:
         if isinstance(exchange, UserExchange):
-            await self._mount(
-                Static(exchange.content, markup=False, classes="message user-message")
-            )
+            await self._mount(_render_user_message(exchange.content))
             return
         if isinstance(exchange, ToolContinuationExchange):
             await self._render_recovered_assistant(exchange.assistant, exchange.results)
@@ -1492,6 +1488,19 @@ _MD_PATTERN = re.compile(
 
 def _has_markdown_formatting(text: str) -> bool:
     return _MD_PATTERN.search(text) is not None
+
+
+def _render_user_message(text: str) -> Vertical:
+    """User prompt: a bare divider rule above a background-filled text block.
+
+    The divider lives outside the background block so the rule row keeps the
+    terminal's default background instead of inheriting the message color.
+    """
+    return Vertical(
+        Rule(classes="user-divider"),
+        Static(text, markup=False, classes="user-text"),
+        classes="message user-message",
+    )
 
 
 def _render_assistant_content(text: str) -> Horizontal:

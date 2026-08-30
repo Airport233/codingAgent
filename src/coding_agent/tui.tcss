@@ -31,9 +31,18 @@ Screen {
 }
 
 .user-message {
+    background: transparent;
+    padding: 0;
+}
+
+.user-divider {
+    color: #243244;
+    margin: 0;
+}
+
+.user-text {
     background: #1a1f2e;
     padding: 1 2;
-    border-top: solid #243244;
 }
 
 .assistant-message {

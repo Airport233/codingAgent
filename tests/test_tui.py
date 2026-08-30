@@ -386,7 +386,7 @@ async def test_tui_submits_prompt_and_streams_assistant_card() -> None:
         await pilot.press("enter")
         await pilot.pause()
 
-        assert "Fix the tests" in str(app.query_one(".user-message").render())
+        assert "Fix the tests" in str(app.query_one(".user-text").render())
         assert "Finished successfully." in _widget_text(app.query_one(".assistant-message"))
         assert composer.value == ""
         assert composer.disabled is False
@@ -458,7 +458,7 @@ async def test_shift_enter_adds_newline_and_enter_submits_multiline_prompt() -> 
         await pilot.press("enter")
         await pilot.pause()
 
-        assert "First line\nSecond line" in str(app.query_one(".user-message").render())
+        assert "First line\nSecond line" in str(app.query_one(".user-text").render())
 
 
 async def test_empty_composer_navigates_prompt_history_and_text_arrows_move_to_edges() -> None:
