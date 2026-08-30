@@ -118,3 +118,43 @@ def test_install_streams_output_and_detects_new_skills(
     assert result.installed == ("demo",)
     assert len(result.output) >= 2
     assert any("Adding skill" in line for line in result.output)
+
+
+def test_install_runs_npx_from_the_project_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """npx discovers its install target from cwd; it must match the loader's root."""
+    project_dir = tmp_path / ".agents" / "skills"
+    project_dir.mkdir(parents=True)
+    captured: dict[str, object] = {}
+
+    class _FakeStream:
+        async def __aiter__(self):
+            yield b"Done\n"
+
+    class _FakeProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdout = _FakeStream()
+
+        async def wait(self) -> int:
+            self.returncode = 0
+            return 0
+
+        def kill(self) -> None:
+            pass
+
+    async def _fake_create_subprocess_exec(*args: str, **kwargs: object):
+        captured.update(kwargs)
+        return _FakeProcess()
+
+    monkeypatch.setattr(shutil, "which", lambda _cmd: "/fake/npx")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    installer = SkillInstaller(
+        user_dir=tmp_path / "user" / "skills",
+        project_dir=project_dir,
+    )
+    asyncio.run(installer.install("owner/repo"))
+
+    assert Path(str(captured["cwd"])) == tmp_path

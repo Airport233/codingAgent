@@ -15,6 +15,7 @@ from coding_agent.approval import ApprovalAction, ApprovalMode, ConfigurableAppr
 from coding_agent.context import ContextBudget, ContextManager, TokenEstimator
 from coding_agent.domain import ToolUseBlock
 from coding_agent.memory.loader import ProjectMemoryLoader
+from coding_agent.prompts import render_base_prompt
 from coding_agent.providers.anthropic import AnthropicMessagesProvider
 from coding_agent.providers.base import Provider
 from coding_agent.providers.config import normalize_sdk_base_url
@@ -365,6 +366,7 @@ async def create_runtime(
         shell_classifier=classify_tool_call,
         guardian_enabled=settings.guardian_enabled,
         skills=skills,
+        base_prompt=render_base_prompt(settings.workspace),
     )
     return AgentRuntime(application, store.session_id, client)
 

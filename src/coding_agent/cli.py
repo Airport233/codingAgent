@@ -31,6 +31,7 @@ from coding_agent.runtime import (
     RuntimeConfigurationError,
     RuntimeSettings,
     create_runtime,
+    discover_project_root,
 )
 from coding_agent.sessions.jsonl import JsonlSessionRepository, SessionSummary
 from coding_agent.skills import format_skill_list
@@ -145,7 +146,7 @@ async def run_repl(
 
             installer = SkillInstaller(
                 user_dir=user_data_path("codingAgent") / "skills",
-                project_dir=Path(workspace) / ".agents" / "skills",
+                project_dir=discover_project_root(Path(workspace)) / ".agents" / "skills",
             )
             result = await installer.install(source)
             if result.installed:
@@ -164,7 +165,7 @@ async def run_repl(
 
             installer = SkillInstaller(
                 user_dir=user_data_path("codingAgent") / "skills",
-                project_dir=Path(workspace) / ".agents" / "skills",
+                project_dir=discover_project_root(Path(workspace)) / ".agents" / "skills",
             )
             removed = await installer.uninstall(name)
             if removed:

@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
-from textual.containers import Vertical
-from textual.widgets import Collapsible, Label, OptionList
+from textual.containers import Vertical, VerticalScroll
+from textual.widgets import Label, OptionList
 
 import coding_agent.tui as tui_module
 from coding_agent.application import AgentApplication
@@ -25,7 +25,12 @@ from coding_agent.domain import (
     ToolUseBlock,
     UserExchange,
 )
-from coding_agent.providers.base import ProviderEvent, ProviderResponseFinished
+from coding_agent.providers.base import (
+    ProviderEvent,
+    ProviderResponseFinished,
+    ProviderTextDelta,
+    ProviderThinkingDelta,
+)
 from coding_agent.providers.fake import FakeProvider
 from coding_agent.sessions.jsonl import SessionSummary
 from coding_agent.sessions.memory import InMemorySessionStore
@@ -39,10 +44,32 @@ from coding_agent.tui import (
     CompactionProgress,
     PromptTextArea,
     ResumeSessionScreen,
+    ThinkingCard,
+    ToolCard,
     format_slash_help,
 )
 
 pytestmark = pytest.mark.asyncio
+
+
+def _widget_text(widget: object) -> str:
+    """Extract text from a Static (or container of Statics)."""
+    from rich.text import Text
+
+    content = getattr(widget, "_Static__content", None)
+    if content is not None:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, Text):
+            return content.plain
+        if hasattr(content, "markup"):
+            return content.markup
+        return str(content)
+    # For containers (Horizontal etc.), recurse into children.
+    if hasattr(widget, "children"):
+        parts = [_widget_text(child) for child in widget.children]
+        return "\n".join(p for p in parts if p and not p.startswith(str(type(widget).__name__)))
+    return str(widget)
 
 
 async def test_slash_help_uses_one_aligned_command_per_line() -> None:
@@ -55,7 +82,6 @@ async def test_slash_help_uses_one_aligned_command_per_line() -> None:
         "  /skill <name> <task>     Run a task with a coding workflow",
         "  /context                 Show context usage",
         "  /compact                 Compact conversation context",
-        "  /thinking                Toggle thinking details",
         "  /resume                  Resume a saved session",
         "  /clear                   Start a new empty session",
         "  /exit                    Exit codingAgent",
@@ -360,8 +386,8 @@ async def test_tui_submits_prompt_and_streams_assistant_card() -> None:
         await pilot.press("enter")
         await pilot.pause()
 
-        assert "Fix the tests" in str(app.query_one(".user-message").render())
-        assert "Finished successfully." in str(app.query_one(".assistant-message").render())
+        assert "Fix the tests" in str(app.query_one(".user-text").render())
+        assert "Finished successfully." in _widget_text(app.query_one(".assistant-message"))
         assert composer.value == ""
         assert composer.disabled is False
         assert app.query_one("#status-context").display is True
@@ -432,7 +458,7 @@ async def test_shift_enter_adds_newline_and_enter_submits_multiline_prompt() -> 
         await pilot.press("enter")
         await pilot.pause()
 
-        assert "First line\nSecond line" in str(app.query_one(".user-message").render())
+        assert "First line\nSecond line" in str(app.query_one(".user-text").render())
 
 
 async def test_empty_composer_navigates_prompt_history_and_text_arrows_move_to_edges() -> None:
@@ -570,7 +596,6 @@ async def test_slash_popup_allocates_visible_rows_for_every_command_match() -> N
             ("/m", ("/model", "/mode")),
             ("/r", ("/resume",)),
             ("/h", ("/help",)),
-            ("/t", ("/thinking",)),
         ):
             composer.value = prefix
             await pilot.pause()
@@ -651,10 +676,8 @@ async def test_resume_command_opens_full_screen_picker_and_installs_selection() 
 
         assert resumed_ids == ["session-2"]
         assert app.session_id == "session-2"
-        rendered = "\n".join(
-            str(child.render()) for child in app.query_one("#conversation").children
-        )
         conversation = app.query_one("#conversation")
+        rendered = "\n".join(_widget_text(child) for child in conversation.children)
         assert conversation.children[0].id == "brand"
         assert "Selected historical task" in rendered
         assert "Historical answer" in rendered
@@ -758,7 +781,7 @@ async def test_tui_approval_screen_shows_command_and_allows_once() -> None:
         await pilot.pause()
 
         assert shell.executed is True
-        assert "done" in str(app.query_one(".assistant-message").render())
+        assert "done" in _widget_text(app.query_one(".assistant-message"))
 
 
 async def test_slash_popup_handles_plain_completion_and_no_matches() -> None:
@@ -880,16 +903,381 @@ async def test_tui_renders_collapsible_thinking_and_completed_tool_card() -> Non
         await pilot.press("enter")
         await pilot.pause()
 
-        thinking = app.query_one(".thinking-card", Collapsible)
-        tool = app.query_one(".tool-card", Collapsible)
-        assert thinking.collapsed is True
-        assert thinking.title == "Thinking · complete"
-        assert "uv run pytest" in tool.title
-        assert "[tests]" in tool.title
-        assert "done" in tool.title
-        assert '"command": "uv run pytest"' in str(tool.query_one(".tool-body").render())
-        assert "Result:" in str(tool.query_one(".tool-body").render())
-        assert "all green" in str(tool.query_one(".tool-body").render())
+        thinking = app.query_one(".thinking-card", Vertical)
+        tool = app.query_one(".tool-card", ToolCard)
+        thinking_title = _widget_text(thinking.query_one(".thinking-title"))
+        assert "Thought" in thinking_title
+        title_text = _widget_text(tool.query_one(".tool-title"))
+        assert "✓" in title_text
+        assert "Ran uv run pytest" in title_text
+        tool_body = _widget_text(tool.query_one(".tool-body"))
+        assert "uv run pytest" in tool_body
+        assert "all green" in tool_body
+
+
+async def test_tool_card_runs_then_settles_and_toggles_on_title_click() -> None:
+    release = asyncio.Event()
+
+    class ShellInput(BaseModel):
+        command: str
+        cwd: str = "."
+
+    class SlowShell:
+        name = "shell"
+        description = "Run a test command"
+        input_model = ShellInput
+
+        async def execute(self, arguments: BaseModel) -> ToolOutput:
+            await release.wait()
+            return ToolOutput("ok")
+
+    provider = FakeProvider(
+        [
+            AssistantExchange(
+                (ToolUseBlock("call-1", "shell", {"command": "make test"}),),
+                "tool_use",
+            ),
+            AssistantExchange((TextBlock("done"),), "end_turn"),
+        ]
+    )
+    app = CodingAgentTui(
+        AgentApplication(
+            provider,
+            ToolDispatcher(ToolCatalog({"shell": SlowShell()})),
+            InMemorySessionStore(),
+        ),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        app.query_one("#composer").value = "Run tests"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        card = app.query_one(".tool-card", ToolCard)
+        assert card.pending
+        assert "Running make test" in _widget_text(card.query_one(".tool-title"))
+        assert app.query_one(".tool-body-wrap").display is False
+
+        release.set()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert not card.pending
+        title = _widget_text(card.query_one(".tool-title"))
+        assert "✓" in title
+        assert "Ran make test" in title
+
+        # Shell bodies stay collapsed by default; clicking the title toggles.
+        assert app.query_one(".tool-body-wrap").display is False
+        await pilot.click(".tool-title")
+        await pilot.pause()
+        assert app.query_one(".tool-body-wrap").display is True
+        await pilot.click(".tool-title")
+        await pilot.pause()
+        assert app.query_one(".tool-body-wrap").display is False
+
+
+async def test_cancelled_turn_marks_pending_tool_card_interrupted() -> None:
+    class ShellInput(BaseModel):
+        command: str
+        cwd: str = "."
+
+    class HangingShell:
+        name = "shell"
+        description = "Run a test command"
+        input_model = ShellInput
+
+        async def execute(self, arguments: BaseModel) -> ToolOutput:
+            await asyncio.Event().wait()
+            return ToolOutput("unreachable")
+
+    provider = FakeProvider(
+        [
+            AssistantExchange(
+                (ToolUseBlock("call-1", "shell", {"command": "make test"}),),
+                "tool_use",
+            ),
+        ]
+    )
+    app = CodingAgentTui(
+        AgentApplication(
+            provider,
+            ToolDispatcher(ToolCatalog({"shell": HangingShell()})),
+            InMemorySessionStore(),
+        ),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        app.query_one("#composer").value = "Run tests"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        card = app.query_one(".tool-card", ToolCard)
+        assert card.pending
+
+        await app.action_cancel_turn()
+        for _ in range(6):
+            await pilot.pause()
+
+        title = _widget_text(card.query_one(".tool-title"))
+        assert "✕" in title
+        assert "cancelled" in title
+
+
+async def test_thinking_card_finish_reports_elapsed_time() -> None:
+    app = CodingAgentTui(
+        application_with_response(),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test():
+        card = ThinkingCard(running=True)
+        card.finish(2.4)
+        assert "Thought for 2s" in card._title_renderable().plain
+        assert "•" in card._title_renderable().plain
+        card.finish(9.0)  # idempotent: already settled
+        assert "Thought for 2s" in card._title_renderable().plain
+
+        quick = ThinkingCard(running=True)
+        quick.finish(0.2)
+        assert "Thought for a moment" in quick._title_renderable().plain
+
+        recovered = ThinkingCard("Thought")
+        recovered.finish(3.0)  # no-op: never running
+        assert "Thought" in recovered._title_renderable().plain
+        assert "3s" not in recovered._title_renderable().plain
+
+
+async def test_thinking_panel_auto_expands_while_streaming_and_collapses_when_done() -> None:
+    class StreamingThinkingProvider:
+        def __init__(self) -> None:
+            self.release = asyncio.Event()
+
+        async def stream(
+            self,
+            conversation: tuple[ConversationExchange, ...],
+            tools: tuple[ToolSpec, ...],
+            system_instructions: str | None = None,
+        ) -> AsyncIterator[ProviderEvent]:
+            del conversation, tools, system_instructions
+            yield ProviderThinkingDelta(thinking="step one")
+            await self.release.wait()
+            yield ProviderResponseFinished(
+                AssistantExchange(
+                    (ThinkingBlock("step one"), TextBlock("done")), "end_turn"
+                )
+            )
+
+    provider = StreamingThinkingProvider()
+    app = CodingAgentTui(
+        AgentApplication(provider, ToolDispatcher(ToolCatalog({})), InMemorySessionStore()),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        app.query_one("#composer").value = "Think it through"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        thinking = app.query_one(".thinking-card", Vertical)
+        # Compact mode: body shows only last 3 lines during streaming
+        assert "step one" in _widget_text(thinking.query_one(".thinking-body"))
+        # Body has fixed height (compact), not expanded
+        assert not thinking.query_one(".thinking-body").has_class("expanded")
+
+        provider.release.set()
+        await pilot.pause()
+        await pilot.pause()
+
+        # Panel title changes to past-tense "Thought", stays in compact mode
+        assert "Thought" in _widget_text(thinking.query_one(".thinking-title"))
+        assert not thinking.query_one(".thinking-body").has_class("expanded")
+
+
+async def test_second_thinking_panel_does_not_replay_the_first_ones_text() -> None:
+    """Two thinking segments in one turn must each show only their own text."""
+
+    class TwoStepThinkingProvider:
+        def __init__(self) -> None:
+            self.step = 0
+
+        async def stream(
+            self,
+            conversation: tuple[ConversationExchange, ...],
+            tools: tuple[ToolSpec, ...],
+            system_instructions: str | None = None,
+        ) -> AsyncIterator[ProviderEvent]:
+            del conversation, tools, system_instructions
+            self.step += 1
+            if self.step == 1:
+                yield ProviderThinkingDelta(thinking="first reasoning")
+                yield ProviderResponseFinished(
+                    AssistantExchange(
+                        (
+                            ThinkingBlock("first reasoning"),
+                            ToolUseBlock("call-1", "noop", {}),
+                        ),
+                        "tool_use",
+                    )
+                )
+            else:
+                yield ProviderThinkingDelta(thinking="second reasoning")
+                yield ProviderResponseFinished(
+                    AssistantExchange(
+                        (ThinkingBlock("second reasoning"), TextBlock("done")),
+                        "end_turn",
+                    )
+                )
+
+    class NoopTool:
+        name = "noop"
+        description = "Does nothing"
+
+        class input_model(BaseModel):
+            pass
+
+        async def execute(self, arguments: BaseModel) -> ToolOutput:
+            return ToolOutput("ok")
+
+    provider = TwoStepThinkingProvider()
+    app = CodingAgentTui(
+        AgentApplication(
+            provider,
+            ToolDispatcher(ToolCatalog({"noop": NoopTool()})),
+            InMemorySessionStore(),
+        ),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        app.query_one("#composer").value = "Do two steps"
+        await pilot.press("enter")
+        for _ in range(8):
+            await pilot.pause()
+
+        cards = app.query(".thinking-card")
+        assert len(cards) == 2
+        first_text = _widget_text(cards[0].query_one(".thinking-body"))
+        second_text = _widget_text(cards[1].query_one(".thinking-body"))
+        assert "first reasoning" in first_text
+        assert "first reasoning" not in second_text
+        assert "second reasoning" in second_text
+
+
+async def test_streaming_text_growth_does_not_yank_a_scrolled_up_view() -> None:
+    """In-place growth while the user has scrolled up must keep the viewport put."""
+
+    class StreamingTextProvider:
+        def __init__(self) -> None:
+            self.release = asyncio.Event()
+
+        async def stream(
+            self,
+            conversation: tuple[ConversationExchange, ...],
+            tools: tuple[ToolSpec, ...],
+            system_instructions: str | None = None,
+        ) -> AsyncIterator[ProviderEvent]:
+            del conversation, tools, system_instructions
+            yield ProviderTextDelta(text="first chunk\n" * 40)
+            await self.release.wait()
+            yield ProviderTextDelta(text="second chunk\n" * 40)
+            yield ProviderResponseFinished(
+                AssistantExchange(
+                    (TextBlock(("first chunk\n" * 40) + ("second chunk\n" * 40)),),
+                    "end_turn",
+                )
+            )
+
+    provider = StreamingTextProvider()
+    app = CodingAgentTui(
+        AgentApplication(provider, ToolDispatcher(ToolCatalog({})), InMemorySessionStore()),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test(size=(80, 20)) as pilot:
+        app.query_one("#composer").value = "Write a lot"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        conversation = app.query_one("#conversation", VerticalScroll)
+        assert conversation.is_vertical_scroll_end is True
+
+        conversation.scroll_home(animate=False)
+        await pilot.pause()
+        assert conversation.is_vertical_scroll_end is False
+        scroll_y_before = conversation.scroll_y
+
+        provider.release.set()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert conversation.scroll_y == scroll_y_before
+        assert conversation.is_vertical_scroll_end is False
+
+
+async def test_newly_mounted_agent_widget_does_not_yank_a_scrolled_up_view() -> None:
+    class DelayedToolProvider:
+        def __init__(self) -> None:
+            self.release = asyncio.Event()
+
+        async def stream(
+            self,
+            conversation: tuple[ConversationExchange, ...],
+            tools: tuple[ToolSpec, ...],
+            system_instructions: str | None = None,
+        ) -> AsyncIterator[ProviderEvent]:
+            del conversation, tools, system_instructions
+            yield ProviderTextDelta(text="padding line\n" * 40)
+            await self.release.wait()
+            yield ProviderResponseFinished(
+                AssistantExchange(
+                    (
+                        TextBlock("padding line\n" * 40),
+                        ToolUseBlock("call-1", "shell", {"command": "echo hi"}),
+                    ),
+                    "tool_use",
+                )
+            )
+
+    provider = DelayedToolProvider()
+    app = CodingAgentTui(
+        AgentApplication(provider, ToolDispatcher(ToolCatalog({})), InMemorySessionStore()),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test(size=(80, 20)) as pilot:
+        app.query_one("#composer").value = "Go"
+        await pilot.press("enter")
+        await pilot.pause(0.2)  # wait for layout + deferred scroll timer
+
+        conversation = app.query_one("#conversation", VerticalScroll)
+        assert conversation.is_vertical_scroll_end is True
+
+        conversation.scroll_home(animate=False)
+        await pilot.pause()
+        scroll_y_before = conversation.scroll_y
+
+        provider.release.set()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert conversation.scroll_y == scroll_y_before
 
 
 async def test_tui_replays_full_history_with_compaction_boundary_and_tool_inputs() -> None:
@@ -963,21 +1351,52 @@ async def test_tui_replays_full_history_with_compaction_boundary_and_tool_inputs
         await pilot.pause()
 
         conversation = app.query_one("#conversation")
-        rendered = "\n".join(str(child.render()) for child in conversation.children)
+        rendered = "\n".join(_widget_text(child) for child in conversation.children)
         assert "old request that the model no longer receives verbatim" in rendered
         assert "recent request" in rendered
         assert "recent answer" in rendered
         assert "Context compacted here" in rendered
         assert "compacted" in str(app.query_one("#status-context").render())
-        tool_body = str(app.query_one(".tool-body").render())
-        assert "print('visible after resume')" in tool_body
-        assert "Created hello.py (30 bytes)" in tool_body
+        assert "Wrote hello.py" in _widget_text(app.query_one(".tool-title"))
+        assert "print('visible after resume')" in _widget_text(app.query_one(".diff-added"))
 
         composer = app.query_one("#composer", PromptTextArea)
         await pilot.press("up")
         assert composer.value == "recent request"
         await pilot.press("up")
         assert composer.value == "old request that the model no longer receives verbatim"
+
+
+async def test_recovered_thinking_card_has_no_spinner() -> None:
+    """Recovered history thinking must be static (no live timer, no braille frames)."""
+    history = (
+        UserExchange("older question"),
+        AssistantExchange(
+            (ThinkingBlock("old reasoning"), TextBlock("old answer")),
+            "end_turn",
+        ),
+    )
+    app = CodingAgentTui(
+        AgentApplication(
+            FakeProvider([]),
+            ToolDispatcher(ToolCatalog({})),
+            InMemorySessionStore(),
+            initial_exchanges=history,
+        ),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        card = app.query_one(".thinking-card", ThinkingCard)
+        title = card.query_one(".thinking-title").render().plain
+        assert title.startswith("•")
+        assert card._timer is None
+        await asyncio.sleep(0.3)
+        await pilot.pause()
+        assert card.query_one(".thinking-title").render().plain == title
 
 
 async def test_manual_compaction_shows_indeterminate_progress_until_provider_finishes() -> None:
@@ -1044,7 +1463,125 @@ async def test_manual_compaction_shows_indeterminate_progress_until_provider_fin
 
         release.set()
         await task
+        for _ in range(6):
+            await pilot.pause()
+        assert "Compacted context with provider summary" in str(progress.render())
+        assert app.query_one("#composer", PromptTextArea).disabled is False
+
+
+async def test_slash_command_echoes_as_user_message_and_forces_scroll_to_bottom() -> None:
+    history: tuple[ConversationExchange, ...] = tuple(
+        exchange
+        for index in range(6)
+        for exchange in (
+            UserExchange(f"question {index} " * 20),
+            AssistantExchange((TextBlock(f"answer {index} " * 20),), "end_turn"),
+        )
+    )
+    app = CodingAgentTui(
+        AgentApplication(
+            FakeProvider([]),
+            ToolDispatcher(ToolCatalog({})),
+            InMemorySessionStore(),
+            initial_exchanges=history,
+        ),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test(size=(80, 20)) as pilot:
         await pilot.pause()
+        conversation = app.query_one("#conversation", VerticalScroll)
+        conversation.scroll_home(animate=False)
+        await pilot.pause()
+        assert conversation.is_vertical_scroll_end is False
+
+        app.query_one("#composer").value = "/help"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert conversation.is_vertical_scroll_end is True
+        user_texts = app.query(".user-text")
+        assert any("/help" in _widget_text(widget) for widget in user_texts)
+
+
+async def test_compact_does_not_freeze_scrolling() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    summary = (
+        "task_goal: continue\n"
+        "user_constraints: none\n"
+        "decisions: none\n"
+        "files_read: none\n"
+        "files_modified: none\n"
+        "commands_and_results: none\n"
+        "verification_status: pending\n"
+        "known_failures: none\n"
+        "pending_work: continue"
+    )
+
+    class BlockingSummaryProvider:
+        async def stream(
+            self,
+            conversation: tuple[ConversationExchange, ...],
+            tools: tuple[ToolSpec, ...],
+            system_instructions: str | None = None,
+        ) -> AsyncIterator[ProviderEvent]:
+            del conversation, tools, system_instructions
+            started.set()
+            await release.wait()
+            yield ProviderResponseFinished(AssistantExchange((TextBlock(summary),), "end_turn"))
+
+    history: tuple[ConversationExchange, ...] = tuple(
+        exchange
+        for index in range(6)
+        for exchange in (
+            UserExchange(f"question {index} " * 20),
+            AssistantExchange((TextBlock(f"answer {index} " * 20),), "end_turn"),
+        )
+    )
+    application = AgentApplication(
+        BlockingSummaryProvider(),
+        ToolDispatcher(ToolCatalog({})),
+        InMemorySessionStore(),
+        initial_exchanges=history,
+        context_manager=ContextManager(
+            ContextBudget(context_window=20_000, max_output_tokens=2_000),
+            TokenEstimator(),
+            retained_exchanges=2,
+        ),
+    )
+    app = CodingAgentTui(
+        application,
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test(size=(80, 20)) as pilot:
+        await pilot.pause()
+        app.query_one("#composer").value = "/compact"
+        await pilot.press("enter")
+        await started.wait()
+        await pilot.pause()
+
+        assert app.query_one(".compaction-progress", CompactionProgress) is not None
+
+        # The compaction is still in flight; the view must stay scrollable.
+        conversation = app.query_one("#conversation", VerticalScroll)
+        conversation.scroll_home(animate=False)
+        await pilot.pause()
+        assert conversation.scroll_y == 0
+        conversation.scroll_end(animate=False)
+        await pilot.pause()
+        assert conversation.is_vertical_scroll_end is True
+
+        release.set()
+        for _ in range(6):
+            await pilot.pause()
+        progress = app.query_one(".compaction-progress", CompactionProgress)
         assert "Compacted context with provider summary" in str(progress.render())
         assert app.query_one("#composer", PromptTextArea).disabled is False
 
@@ -1094,7 +1631,7 @@ async def test_tui_preserves_text_and_tool_chronology() -> None:
             "user"
             if child.has_class("user-message")
             else "assistant"
-            if child.has_class("assistant-message")
+            if child.has_class("assistant-row") or child.has_class("assistant-message")
             else "tool"
             if child.has_class("tool-card")
             else "other"
@@ -1102,8 +1639,8 @@ async def test_tui_preserves_text_and_tool_chronology() -> None:
         ]
         assert timeline == ["other", "user", "assistant", "tool", "assistant"]
         replies = app.query(".assistant-message")
-        assert "I will inspect the task." in str(replies[0].render())
-        assert "The task is complete." in str(replies[1].render())
+        assert "I will inspect the task." in _widget_text(replies[0])
+        assert "The task is complete." in _widget_text(replies[1])
 
 
 async def test_tui_slash_commands_update_state_without_leaving_full_screen() -> None:
@@ -1133,8 +1670,6 @@ async def test_tui_slash_commands_update_state_without_leaving_full_screen() -> 
         for command in (
             "/help",
             "/model",
-            "/thinking",
-            "/thinking",
             "/context",
             "/compact",
             "/unknown",

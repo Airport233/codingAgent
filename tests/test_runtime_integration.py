@@ -114,6 +114,29 @@ async def test_new_runtime_does_not_persist_an_empty_session(tmp_path: Path) -> 
     assert '"kind":"user_exchange"' in records[2]
 
 
+@pytest.mark.asyncio
+async def test_runtime_injects_base_prompt_with_workspace_into_first_request(
+    tmp_path: Path,
+) -> None:
+    settings = RuntimeSettings.from_environment(
+        workspace=tmp_path,
+        model="example-model",
+        environ={
+            "CODING_AGENT_BASE_URL": "https://example.invalid/anthropic",
+            "CODING_AGENT_API_KEY": "private-test-credential",
+        },
+        data_root=tmp_path / "data",
+    )
+    provider = FakeProvider([AssistantExchange((TextBlock("answer"),), "end_turn")])
+
+    runtime = await create_runtime(settings, provider=provider)
+    _ = [event async for event in runtime.application.run("do something")]
+    await runtime.aclose()
+
+    assert str(tmp_path.resolve()) in provider.system_instructions[0]
+    assert "relative to the working directory" in provider.system_instructions[0]
+
+
 def test_runtime_settings_load_user_provider_profile(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text(
@@ -555,6 +578,10 @@ async def test_runtime_resume_restores_the_latest_compaction_checkpoint(tmp_path
         not isinstance(exchange, UserExchange) or "long question 0" not in exchange.content
         for exchange in request
     )
+    # The base system prompt is generated fresh outside the compactable exchange
+    # history, so it must reach the model in full after a compaction + resume.
+    assert str(settings.workspace) in resumed_provider.system_instructions[0]
+    assert "relative to the working directory" in resumed_provider.system_instructions[0]
 
 
 @pytest.mark.asyncio

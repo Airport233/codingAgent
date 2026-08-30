@@ -2,22 +2,31 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import ClassVar, Literal, cast
 
-from textual import on
+from rich.console import Console as RichConsole
+from rich.console import RenderableType
+from rich.markdown import Markdown as RichMarkdown
+from rich.syntax import Syntax as RichSyntax
+from rich.text import Text as RichText
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.timer import Timer
-from textual.widgets import Collapsible, Footer, Label, OptionList, Static, TextArea
+from textual.widget import Widget
+from textual.widgets import Footer, Label, OptionList, Rule, Static, TextArea
 from textual.widgets.option_list import Option
 from textual.worker import Worker
 
@@ -51,7 +60,7 @@ from coding_agent.events import (
     ToolStarted,
     WarningRaised,
 )
-from coding_agent.runtime import RuntimeConfigurationError
+from coding_agent.runtime import RuntimeConfigurationError, discover_project_root
 from coding_agent.sessions.jsonl import SessionSummary
 from coding_agent.skills import format_skill_list
 from coding_agent.skills.installer import SkillInstaller
@@ -85,7 +94,6 @@ SLASH_COMMANDS = (
     SlashCommand("skill", "Run a task with a coding workflow", "<name> <task>"),
     SlashCommand("context", "Show context usage"),
     SlashCommand("compact", "Compact conversation context"),
-    SlashCommand("thinking", "Toggle thinking details"),
     SlashCommand("resume", "Resume a saved session"),
     SlashCommand("clear", "Start a new empty session"),
     SlashCommand("exit", "Exit codingAgent"),
@@ -336,9 +344,7 @@ class ApprovalScreen(ModalScreen[tuple[str, ApprovalDecision]]):
     def compose(self) -> ComposeResult:
         with Vertical(id="approval-dialog"):
             yield Static("Permission required", id="approval-title")
-            title = _tool_title(
-                ToolStarted(self.request.call_id, self.request.tool_name, self.request.arguments)
-            )
+            title = _tool_label(self.request.tool_name, self.request.arguments, finished=False)
             details = f"{title}\n\n{_tool_arguments(self.request.arguments)}"
             if self.request.guardian_note:
                 details += f"\n\n[Guardian] {self.request.guardian_note}"
@@ -387,6 +393,223 @@ class ApprovalScreen(ModalScreen[tuple[str, ApprovalDecision]]):
 _MODE_CYCLE: tuple[ApprovalMode, ...] = ("auto", "ask", "deny")
 
 
+class ThinkingCard(Vertical):
+    """Codex-style thinking panel: spinner while streaming, compact summary after.
+
+    Click the title to expand/collapse the full reasoning text.
+    """
+
+    FRAMES = CompactionProgress.FRAMES
+
+    class Toggled(Message):
+        def __init__(self, expanded: bool) -> None:
+            self.expanded = expanded
+            super().__init__()
+
+    def __init__(
+        self, title: str = "Thinking", full_text: str = "", *, running: bool = False
+    ) -> None:
+        super().__init__(classes="thinking-card")
+        self._title_text = title
+        self._full_text = full_text
+        self._expanded = False
+        self._streaming = running
+        self._frame = 0
+        self._timer: Timer | None = None
+        self._title_widget = Static("", classes="thinking-title")
+        self._body_widget = Static(
+            self._compact_text() or "Working…",
+            markup=False,
+            classes="thinking-body",
+        )
+
+    def compose(self) -> ComposeResult:
+        self._title_widget.update(self._title_renderable())
+        yield self._title_widget
+        yield self._body_widget
+
+    def on_mount(self) -> None:
+        if self._streaming:
+            self._timer = self.set_interval(0.12, self._tick)
+
+    def on_unmount(self) -> None:
+        self._stop_timer()
+
+    def _stop_timer(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+
+    def _tick(self) -> None:
+        self._frame = (self._frame + 1) % len(self.FRAMES)
+        self._title_widget.update(self._title_renderable())
+
+    def _title_renderable(self) -> RichText:
+        text = RichText()
+        if self._streaming:
+            text.append(f"{self.FRAMES[self._frame]} ", style="#a78bfa")
+            text.append(self._title_text, style="#a78bfa")
+        else:
+            text.append("• ", style="#a78bfa")
+            text.append(self._title_text, style="#8b98ab")
+        return text
+
+    def _compact_text(self) -> str:
+        lines = self._full_text.splitlines()
+        return "\n".join(lines[-3:]) if len(lines) > 3 else self._full_text
+
+    def update_body(self, text: str) -> None:
+        self._full_text = text
+        self._body_widget.update(
+            self._full_text if self._expanded else self._compact_text() or "Working…"
+        )
+
+    def finish(self, seconds: float | None = None) -> None:
+        """Settle the panel into its final past-tense state. Idempotent."""
+        if not self._streaming:
+            return
+        self._streaming = False
+        self._stop_timer()
+        if seconds is None:
+            self._title_text = "Thought"
+        elif seconds >= 1:
+            self._title_text = f"Thought for {int(seconds)}s"
+        else:
+            self._title_text = "Thought for a moment"
+        self._title_widget.update(self._title_renderable())
+
+    async def on_click(self, event: events.Click) -> None:
+        event.stop()
+        if event.widget is not self._title_widget:
+            return
+        if self._expanded:
+            self._expanded = False
+            self._body_widget.remove_class("expanded")
+            self._body_widget.update(self._compact_text() or "(empty)")
+        else:
+            self._expanded = True
+            self._body_widget.add_class("expanded")
+            self._body_widget.update(self._full_text or "(empty)")
+        self.post_message(self.Toggled(self._expanded))
+
+
+class ToolCard(Vertical):
+    """Codex-style tool card: a one-line status title with a click-to-expand body.
+
+    While running, the title shows an animated spinner and a present-tense
+    label ("Running make test"). On finish it switches to a ✓/✕ icon with a
+    past-tense label ("Ran make test"). The body stays empty until the tool
+    completes; clicking the title toggles its visibility.
+    """
+
+    FRAMES = CompactionProgress.FRAMES
+
+    class Toggled(Message):
+        def __init__(self, expanded: bool) -> None:
+            self.expanded = expanded
+            super().__init__()
+
+    def __init__(
+        self,
+        tool_name: str,
+        arguments: dict[str, object],
+        *,
+        expanded: bool = False,
+        final: tuple[str, bool] | None = None,
+    ) -> None:
+        status_class = "" if final is None else ("failed" if final[1] else "succeeded")
+        super().__init__(classes=f"tool-card {'running' if final is None else status_class}")
+        self._tool_name = tool_name
+        self._arguments = arguments
+        self._expanded = expanded
+        self._final = final
+        self._frame = 0
+        self._timer: Timer | None = None
+        self._title_widget = Static("", classes="tool-title")
+        self._body_wrap = Vertical(classes="tool-body-wrap")
+        self._body_wrap.display = expanded
+
+    @property
+    def tool_name(self) -> str:
+        return self._tool_name
+
+    @property
+    def arguments(self) -> dict[str, object]:
+        return self._arguments
+
+    @property
+    def pending(self) -> bool:
+        return self._final is None
+
+    def compose(self) -> ComposeResult:
+        self._title_widget.update(self._title_renderable())
+        yield self._title_widget
+        yield self._body_wrap
+
+    def on_mount(self) -> None:
+        if self._final is None:
+            self._timer = self.set_interval(0.12, self._tick)
+
+    def on_unmount(self) -> None:
+        self._stop_timer()
+
+    def _stop_timer(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+
+    def _tick(self) -> None:
+        self._frame = (self._frame + 1) % len(self.FRAMES)
+        self._title_widget.update(self._title_renderable())
+
+    def _title_renderable(self) -> RichText:
+        text = RichText()
+        if self._final is None:
+            text.append(f"{self.FRAMES[self._frame]} ", style="#fbbf24")
+            text.append(
+                _tool_label(self._tool_name, self._arguments, finished=False),
+                style="#d7dde5",
+            )
+            return text
+        status, is_error = self._final
+        icon, color = ("✕", "#fb7185") if is_error else ("✓", "#34d399")
+        label = _tool_label(self._tool_name, self._arguments, finished=True)
+        suffix = {"cancelled": " · cancelled", "timeout": " · timed out"}.get(status)
+        if suffix is not None:
+            label += suffix
+        elif status == "interrupted":
+            label += " · interrupted"
+        text.append(f"{icon} ", style=color)
+        text.append(label, style="#fb7185" if is_error else "#d7dde5")
+        return text
+
+    def finish(self, status: str, is_error: bool) -> None:
+        """Settle the card into its final state. Idempotent."""
+        if self._final is not None:
+            return
+        self._final = (status, is_error)
+        self._stop_timer()
+        self.remove_class("running")
+        self.add_class("failed" if is_error else "succeeded")
+        self._title_widget.update(self._title_renderable())
+
+    async def set_body(self, *widgets: Static) -> None:
+        await self._body_wrap.remove_children()
+        if widgets:
+            await self._body_wrap.mount(*widgets)
+        self._body_wrap.display = self._expanded and bool(widgets)
+
+    async def on_click(self, event: events.Click) -> None:
+        event.stop()
+        if event.widget is not self._title_widget:
+            return
+        if not self._body_wrap.children:
+            return
+        self._expanded = not self._expanded
+        self._body_wrap.display = self._expanded
+        self.post_message(self.Toggled(self._expanded))
+
+
 class CodingAgentTui(App[None]):
     CSS_PATH = "tui.tcss"
     TITLE = "codingAgent"
@@ -394,7 +617,6 @@ class CodingAgentTui(App[None]):
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("ctrl+c,super+c", "cancel_turn", "Cancel / copy", show=True, priority=True),
         Binding("ctrl+q", "quit_agent", "Quit", show=True),
-        Binding("ctrl+t", "toggle_thinking", "Thinking", show=True),
         Binding("shift+tab", "cycle_approval_mode", "Mode", show=True, priority=True),
     ]
 
@@ -425,19 +647,20 @@ class CodingAgentTui(App[None]):
         self.clear_session = clear_session
         self.list_sessions = list_sessions
         self.resume_session = resume_session
-        self.thinking_visible = False
         self._turn_worker: Worker[None] | None = None
         self._assistant: Static | None = None
         self._assistant_text = ""
-        self._thinking: tuple[Collapsible, Static] | None = None
+        self._thinking: ThinkingCard | None = None
         self._thinking_text = ""
-        self._tools: dict[str, tuple[Collapsible, Static, str, str]] = {}
+        self._thinking_started = 0.0
+        self._tools: dict[str, ToolCard] = {}
         self._completion_mode: Literal["commands", "models", "skills"] | None = None
         self._completion_matches: list[str] = []
         self._dismissed_completion_value: str | None = None
         self._prompt_history: list[str] = []
         self._history_index: int | None = None
         self._last_history_text: str | None = None
+        self._stick_to_bottom: bool = True
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="conversation"):
@@ -462,10 +685,34 @@ class CodingAgentTui(App[None]):
 
     async def on_mount(self) -> None:
         self.query_one("#completion-popup", Vertical).display = False
+        conversation = self.query_one("#conversation", VerticalScroll)
+        # virtual_size changes AFTER the layout pass, so watching it lets us
+        # scroll with the correct virtual size (unlike calling scroll_end
+        # right after mount/update, which sees a stale size).
+        self.watch(conversation, "virtual_size", self._maybe_stick_to_bottom)
+        self.watch(conversation, "scroll_y", self._track_scroll_position)
         await self._render_recovered_history()
         self._refresh_session_metadata()
         self._update_mode_indicator()
         self.query_one("#composer", PromptTextArea).focus()
+
+    def _maybe_stick_to_bottom(self, old_size: object, new_size: object) -> None:
+        # Only follow when content GREW (new content added).  When content
+        # SHRINKS (e.g. a thinking panel collapsing on ThinkingFinished),
+        # scrolling would yank a user who scrolled up mid-turn, because
+        # _stick_to_bottom might still be True from before the scroll-up
+        # was processed.
+        old_h = getattr(old_size, "height", 0) or 0
+        new_h = getattr(new_size, "height", 0) or 0
+        if new_h >= old_h and self._stick_to_bottom:
+            self.query_one("#conversation", VerticalScroll).scroll_end(
+                animate=False, immediate=True
+            )
+
+    def _track_scroll_position(self) -> None:
+        self._stick_to_bottom = self.query_one(
+            "#conversation", VerticalScroll
+        ).is_vertical_scroll_end
 
     @on(PromptTextArea.Submitted, "#composer")
     async def submit_prompt(self, event: PromptTextArea.Submitted) -> None:
@@ -474,6 +721,7 @@ class CodingAgentTui(App[None]):
             return
         event.text_area.clear()
         if prompt.startswith("/"):
+            await self._mount(_render_user_message(prompt), force_scroll=True)
             await self._command(prompt)
             return
         await self._start_turn(prompt)
@@ -484,11 +732,13 @@ class CodingAgentTui(App[None]):
         *,
         skill_name: str | None = None,
         history_prompt: str | None = None,
+        echo: bool = True,
     ) -> None:
         if self._turn_worker is not None and self._turn_worker.is_running:
             await self._notice("A turn is already running. Press Ctrl+C to cancel it.", "warning")
             return
-        await self._mount(Static(prompt, markup=False, classes="message user-message"))
+        if echo:
+            await self._mount(_render_user_message(prompt), force_scroll=True)
         self._prompt_history.append(history_prompt or prompt)
         self._history_index = None
         self._last_history_text = None
@@ -665,6 +915,7 @@ class CodingAgentTui(App[None]):
             else:
                 composer.clear()
                 self._hide_completion()
+                await self._mount(_render_user_message(selected), force_scroll=True)
                 await self._command(selected)
         elif self._completion_mode == "models":
             if complete_only:
@@ -673,6 +924,7 @@ class CodingAgentTui(App[None]):
             else:
                 composer.clear()
                 self._hide_completion()
+                await self._mount(_render_user_message(f"/model {selected}"), force_scroll=True)
                 await self._command(f"/model {selected}")
         elif self._completion_mode == "skills":
             composer.value = f"/skill {selected} "
@@ -696,34 +948,37 @@ class CodingAgentTui(App[None]):
                     self.push_screen(ApprovalScreen(event), self._approval_selected)
                 elif isinstance(event, TextDelta):
                     if self._assistant is None:
+                        row = Horizontal(classes="assistant-row")
+                        await self._mount(row)
+                        await row.mount(Static("⏺", markup=False, classes="bullet"))
                         self._assistant = Static(
                             "", markup=False, classes="message assistant-message"
                         )
-                        await self._mount(self._assistant)
+                        await row.mount(self._assistant)
+                    at_bottom = self._conversation_at_bottom()
                     self._assistant_text += event.text
                     self._assistant.update(self._assistant_text)
+                    self._follow_bottom_if(at_bottom)
                 elif isinstance(event, ThinkingStarted):
-                    body = Static("Working…", markup=False, classes="thinking-body")
-                    panel = Collapsible(
-                        body,
-                        title="Thinking · working",
-                        collapsed=not self.thinking_visible,
-                        classes="thinking-card",
-                    )
-                    self._thinking = (panel, body)
+                    self._thinking_text = ""
+                    self._thinking_started = time.monotonic()
+                    panel = ThinkingCard(running=True)
+                    self._thinking = panel
                     await self._mount(panel)
                 elif isinstance(event, ThinkingDelta):
+                    at_bottom = self._conversation_at_bottom()
                     self._thinking_text += event.text
                     if self._thinking is not None:
-                        self._thinking[1].update(self._thinking_text or "Working…")
+                        self._thinking.update_body(self._thinking_text)
+                        self._follow_bottom_if(at_bottom)
                 elif isinstance(event, ThinkingFinished):
                     if self._thinking is not None:
-                        self._thinking[0].title = "Thinking · complete"
+                        self._thinking.finish(time.monotonic() - self._thinking_started)
                 elif isinstance(event, ToolStarted):
-                    self._finish_assistant_segment()
+                    await self._finish_assistant_segment()
                     await self._tool_started(event)
                 elif isinstance(event, ToolFinished):
-                    self._tool_finished(event)
+                    await self._tool_finished(event)
                 elif isinstance(event, ContextUsageChanged):
                     self.query_one("#status-context", Label).update(
                         f"context ~{event.used_tokens}/{event.context_window} · {event.level}"
@@ -732,36 +987,43 @@ class CodingAgentTui(App[None]):
                     await self._notice(event.message, "error")
                 elif isinstance(event, (AgentCancelled, WarningRaised)):
                     await self._notice(event.message, "warning")
-                elif isinstance(event, AgentCompleted) and self._assistant is None and event.text:
-                    self._assistant = Static(
-                        event.text, markup=False, classes="message assistant-message"
-                    )
-                    await self._mount(self._assistant)
+                elif isinstance(event, AgentCompleted):
+                    if self._assistant is not None and self._assistant_text:
+                        await self._finish_assistant_segment()
+                    elif event.text:
+                        await self._mount(_render_assistant_content(event.text))
         finally:
-            self.query_one("#composer", PromptTextArea).disabled = False
-            self.query_one("#composer", PromptTextArea).focus()
+            if self._thinking is not None:
+                self._thinking.finish(time.monotonic() - self._thinking_started)
+            for card in self._tools.values():
+                if card.pending:
+                    card.finish("interrupted", True)
+            with suppress(NoMatches):
+                composer = self.query_one("#composer", PromptTextArea)
+                composer.disabled = False
+                composer.focus()
 
     async def _tool_started(self, event: ToolStarted) -> None:
-        details = _tool_arguments(event.arguments)
-        body = Static(details, markup=False, classes="tool-body")
-        panel = Collapsible(
-            body,
-            title=f"● {_tool_title(event)} · running",
-            collapsed=True,
-            classes="tool-card running",
+        card = ToolCard(
+            event.tool_name,
+            event.arguments,
+            expanded=event.tool_name in ("edit_file", "write_file"),
         )
-        self._tools[event.call_id] = (panel, body, _tool_title(event), details)
-        await self._mount(panel)
+        self._tools[event.call_id] = card
+        await self._mount(card)
 
-    def _tool_finished(self, event: ToolFinished) -> None:
-        item = self._tools.get(event.call_id)
-        if item is None:
+    async def _tool_finished(self, event: ToolFinished) -> None:
+        card = self._tools.get(event.call_id)
+        if card is None:
             return
-        panel, body, title, details = item
-        panel.title = f"{'✓' if not event.is_error else '✕'} {title} · {event.status}"
-        panel.remove_class("running")
-        panel.add_class("failed" if event.is_error else "succeeded")
-        body.update(_tool_body(details, event.content))
+        at_bottom = self._conversation_at_bottom()
+        card.finish(event.status, event.is_error)
+        await card.set_body(
+            *_render_tool_body(
+                card.tool_name, card.arguments, event.content, is_error=event.is_error
+            )
+        )
+        self._follow_bottom_if(at_bottom)
 
     async def _command(self, prompt: str) -> None:
         if prompt == "/help":
@@ -818,7 +1080,7 @@ class CodingAgentTui(App[None]):
             if skill_name not in available:
                 await self._notice(f"Unknown skill: {skill_name}. Use /skills.", "error")
                 return
-            await self._start_turn(task, skill_name=skill_name, history_prompt=prompt)
+            await self._start_turn(task, skill_name=skill_name, history_prompt=prompt, echo=False)
         elif prompt == "/model":
             choices = ", ".join(self.available_models) or self.model
             await self._notice(f"Model: {self.model}\nAvailable: {choices}", "info")
@@ -865,8 +1127,6 @@ class CodingAgentTui(App[None]):
                 ResumeSessionScreen(sessions, current_session_id=self.session_id),
                 self._resume_selected,
             )
-        elif prompt == "/thinking":
-            await self.action_toggle_thinking()
         elif prompt == "/context":
             status = self.application.context_status()
             if status is None:
@@ -892,35 +1152,40 @@ class CodingAgentTui(App[None]):
             await self._notice(message, "info")
         elif prompt == "/compact":
             progress = CompactionProgress()
-            await self._mount(progress)
-            composer = self.query_one("#composer", PromptTextArea)
-            composer.disabled = True
-            try:
-                checkpoint = await self.application.compact_context()
-            except Exception:
-                progress.finish("Context compaction failed; original context retained.", "error")
-                return
-            finally:
-                composer.disabled = False
-                composer.focus()
-            self._refresh_context_label()
-            message = (
-                "Context is too short to compact."
-                if checkpoint is None
-                else (
-                    f"Compacted context with {checkpoint.strategy} summary: estimated "
-                    f"{checkpoint.before_tokens} → {checkpoint.after_tokens} tokens; "
-                    f"replaced {checkpoint.retained_from} exchanges, retained "
-                    f"{len(checkpoint.projected) - 1}."
-                )
-            )
-            progress.finish(message)
+            await self._mount(progress, force_scroll=True)
+            self.query_one("#composer", PromptTextArea).disabled = True
+            self.run_worker(self._run_compaction(progress), group="compaction", exclusive=True)
         elif prompt == "/exit":
             await self.action_quit_agent()
         else:
             await self._notice(
                 f"Unknown command: {prompt.split(maxsplit=1)[0]}. Use /help.", "error"
             )
+
+    async def _run_compaction(self, progress: CompactionProgress) -> None:
+        """Worker body for /compact; runs off the app's message pump."""
+        try:
+            checkpoint = await self.application.compact_context()
+        except Exception:
+            progress.finish("Context compaction failed; original context retained.", "error")
+            return
+        finally:
+            with suppress(NoMatches):
+                composer = self.query_one("#composer", PromptTextArea)
+                composer.disabled = False
+                composer.focus()
+        self._refresh_context_label()
+        message = (
+            "Context is too short to compact."
+            if checkpoint is None
+            else (
+                f"Compacted context with {checkpoint.strategy} summary: estimated "
+                f"{checkpoint.before_tokens} → {checkpoint.after_tokens} tokens; "
+                f"replaced {checkpoint.retained_from} exchanges, retained "
+                f"{len(checkpoint.projected) - 1}."
+            )
+        )
+        progress.finish(message)
 
     def _install_transition(self, transition: CliTransition) -> None:
         self.application = transition.application
@@ -979,10 +1244,27 @@ class CodingAgentTui(App[None]):
         self._last_history_text = None
         await self._render_recovered_history()
 
-    async def _mount(self, widget: Static | Collapsible) -> None:
+    async def _mount(
+        self, widget: Widget, *, force_scroll: bool = False
+    ) -> None:
         conversation = self.query_one("#conversation", VerticalScroll)
+        was_at_bottom = conversation.is_vertical_scroll_end
         await conversation.mount(widget)
-        conversation.scroll_end(animate=False)
+        if force_scroll or was_at_bottom:
+            # Don't call scroll_end here -- it would use a stale virtual
+            # size and corrupt _stick_to_bottom via the scroll_y watch.
+            # Just set the flag; the virtual_size watch fires after the
+            # layout pass and scrolls with the correct size.
+            self._stick_to_bottom = True
+
+    def _conversation_at_bottom(self) -> bool:
+        return self.query_one("#conversation", VerticalScroll).is_vertical_scroll_end
+
+    def _follow_bottom_if(self, was_at_bottom: bool) -> None:
+        """Re-stick the view to the bottom after in-place content growth,
+        but only if the user hadn't scrolled away before the update."""
+        if was_at_bottom:
+            self._stick_to_bottom = True
 
     async def _mount_welcome(self) -> None:
         await self._mount(Static(self._welcome_text(), markup=False, id="brand"))
@@ -1020,14 +1302,24 @@ class CodingAgentTui(App[None]):
         )
 
     def _reset_turn_widgets(self) -> None:
+        if self._thinking is not None:
+            self._thinking.finish()
         self._assistant = None
         self._assistant_text = ""
         self._thinking = None
         self._thinking_text = ""
         self._tools = {}
 
-    def _finish_assistant_segment(self) -> None:
-        """Make later text render after the event that ended this segment."""
+    async def _finish_assistant_segment(self) -> None:
+        """Replace streaming plain-text with rendered Markdown when it contains formatting."""
+        if (
+            self._assistant is not None
+            and self._assistant_text
+            and _has_markdown_formatting(self._assistant_text)
+        ):
+            at_bottom = self._conversation_at_bottom()
+            self._assistant.update(RichMarkdown(self._assistant_text))
+            self._follow_bottom_if(at_bottom)
         self._assistant = None
         self._assistant_text = ""
 
@@ -1065,9 +1357,7 @@ class CodingAgentTui(App[None]):
 
     async def _render_recovered_exchange(self, exchange: ConversationExchange) -> None:
         if isinstance(exchange, UserExchange):
-            await self._mount(
-                Static(exchange.content, markup=False, classes="message user-message")
-            )
+            await self._mount(_render_user_message(exchange.content))
             return
         if isinstance(exchange, ToolContinuationExchange):
             await self._render_recovered_assistant(exchange.assistant, exchange.results)
@@ -1082,29 +1372,13 @@ class CodingAgentTui(App[None]):
         result_by_id = {result.tool_use_id: result for result in results}
         for block in exchange.blocks:
             if isinstance(block, TextBlock) and block.text:
-                await self._mount(
-                    Static(block.text, markup=False, classes="message assistant-message")
-                )
+                await self._mount(_render_assistant_content(block.text))
             elif isinstance(block, ThinkingBlock):
-                body = Static(block.thinking or "(empty)", markup=False, classes="thinking-body")
-                await self._mount(
-                    Collapsible(
-                        body,
-                        title="Thinking · recovered",
-                        collapsed=not self.thinking_visible,
-                        classes="thinking-card",
-                    )
-                )
+                card = ThinkingCard("Thought", block.thinking or "(empty)")
+                await self._mount(card)
             elif isinstance(block, RedactedThinkingBlock):
-                body = Static("Provider-redacted thinking", markup=False, classes="thinking-body")
-                await self._mount(
-                    Collapsible(
-                        body,
-                        title="Thinking · redacted",
-                        collapsed=True,
-                        classes="thinking-card",
-                    )
-                )
+                card = ThinkingCard("Thought · redacted", "Provider-redacted thinking")
+                await self._mount(card)
             elif isinstance(block, ToolUseBlock):
                 await self._render_recovered_tool(block, result_by_id.get(block.call_id))
             elif isinstance(block, UnknownProviderBlock):
@@ -1119,27 +1393,23 @@ class CodingAgentTui(App[None]):
     async def _render_recovered_tool(
         self, call: ToolUseBlock, result: ToolResultBlock | None
     ) -> None:
-        started = ToolStarted(call.call_id, call.name, call.input)
-        title = _tool_title(started)
-        details = _tool_arguments(call.input)
         content = "interrupted before result" if result is None else result.content
-        body = Static(_tool_body(details, content), markup=False, classes="tool-body")
         failed = result is None or result.is_error
         status = "interrupted" if result is None else ("error" if result.is_error else "done")
-        panel = Collapsible(
-            body,
-            title=f"{'✕' if failed else '✓'} {title} · {status}",
-            collapsed=True,
-            classes="tool-card failed" if failed else "tool-card succeeded",
+        card = ToolCard(
+            call.name,
+            call.input,
+            expanded=call.name in ("edit_file", "write_file"),
+            final=(status, failed),
         )
-        await self._mount(panel)
+        await self._mount(card)
+        await card.set_body(*_render_tool_body(call.name, call.input, content, is_error=failed))
 
-    async def action_toggle_thinking(self) -> None:
-        self.thinking_visible = not self.thinking_visible
-        if self._thinking is not None:
-            self._thinking[0].collapsed = not self.thinking_visible
-        state = "shown" if self.thinking_visible else "hidden"
-        await self._notice(f"Thinking details: {state}.", "info")
+    @on(ThinkingCard.Toggled)
+    @on(ToolCard.Toggled)
+    def _on_panel_toggled(self, message: ThinkingCard.Toggled | ToolCard.Toggled) -> None:
+        if message.expanded:
+            self._stick_to_bottom = False
 
     async def action_cycle_approval_mode(self) -> None:
         current = self.application.approval_mode()
@@ -1163,7 +1433,7 @@ class CodingAgentTui(App[None]):
 
         return SkillInstaller(
             user_dir=user_data_path("codingAgent") / "skills",
-            project_dir=Path(self.workspace).expanduser() / ".agents" / "skills",
+            project_dir=discover_project_root(Path(self.workspace)) / ".agents" / "skills",
         )
 
     async def _install_skill(self, source: str) -> None:
@@ -1215,36 +1485,215 @@ class CodingAgentTui(App[None]):
         self.exit()
 
 
-def _tool_title(event: ToolStarted) -> str:
-    if event.tool_name == "shell":
-        command = event.arguments.get("command")
-        cwd = event.arguments.get("cwd", ".")
-        return f"shell [{cwd}] $ {command}" if isinstance(command, str) else "shell"
-    path = event.arguments.get("path")
+_MD_PATTERN = re.compile(
+    r"```"           # fenced code block
+    r"|^#{1,6}\s"    # heading
+    r"|^\*\s"        # unordered list
+    r"|^\d+\.\s"     # ordered list
+    r"|\*\*.+\*\*"   # bold
+    r"|`.+`",        # inline code
+    re.MULTILINE,
+)
+
+
+def _has_markdown_formatting(text: str) -> bool:
+    return _MD_PATTERN.search(text) is not None
+
+
+def _render_user_message(text: str) -> Vertical:
+    """User prompt: a bare divider rule above a background-filled text block.
+
+    The divider lives outside the background block so the rule row keeps the
+    terminal's default background instead of inheriting the message color.
+    """
+    return Vertical(
+        Rule(classes="user-divider"),
+        Static(text, markup=False, classes="user-text"),
+        classes="message user-message",
+    )
+
+
+def _render_assistant_content(text: str) -> Horizontal:
+    bullet = Static("⏺", markup=False, classes="bullet")
+    if _has_markdown_formatting(text):
+        content = Static(RichMarkdown(text), classes="message assistant-message")
+    else:
+        content = Static(text, markup=False, classes="message assistant-message")
+    return Horizontal(bullet, content, classes="assistant-row")
+
+
+def _render_tool_body(
+    tool_name: str, arguments: dict[str, object], result: str, *, is_error: bool = False
+) -> tuple[Static, ...]:
+    """Return one or more Static widgets for the tool body."""
+    result_text = _preview_text(result or "(no output)", 12_000)
+    if is_error:
+        return (Static(result_text, markup=False, classes="tool-body error-output"),)
+    if tool_name == "shell":
+        text = RichText()
+        command = arguments.get("command")
+        if isinstance(command, str) and command.strip():
+            text.append("$ ", style="bold #7dd3fc")
+            text.append_text(
+                _renderable_to_text(RichSyntax(command, "bash", theme="github-dark", padding=0))
+            )
+            text.append("\n\n")
+        text.append(result_text)
+        return (Static(text, classes="tool-body"),)
+    if tool_name == "edit_file":
+        return _render_edit_diff(arguments)
+    if tool_name == "write_file":
+        return _render_write_summary(arguments)
+    if tool_name in ("read_file", "code_search", "mkdir", "activate_skill", "read_skill_resource"):
+        return (Static(result_text, markup=False, classes="tool-body"),)
+    args_text = _tool_arguments(arguments)
+    return (Static(f"{args_text}\n\n{result_text}", markup=False, classes="tool-body"),)
+
+
+def _render_edit_diff(arguments: dict[str, object]) -> tuple[Static, ...]:
+    """Render edit_file as a +/- gutter diff with syntax highlighting."""
+    path = arguments.get("path", "?")
+    expected = arguments.get("expected_content", "")
+    replacement = arguments.get("replacement", "")
+    if not isinstance(expected, str) or not isinstance(replacement, str):
+        return (Static("(edit preview unavailable)", markup=False, classes="tool-body"),)
+
+    lang = _lang_from_path(str(path))
+    widgets: list[Static] = []
+    if expected:
+        widgets.append(Static(_diff_lines(expected, lang, "-", "#f47067"), classes="diff-removed"))
+    if replacement:
+        widgets.append(Static(_diff_lines(replacement, lang, "+", "#57ab5a"), classes="diff-added"))
+    return tuple(widgets)
+
+
+def _render_write_summary(arguments: dict[str, object]) -> tuple[Static, ...]:
+    """Render write_file as an all-added block with an overflow note."""
+    path = arguments.get("path", "?")
+    content = arguments.get("content", "")
+    if not isinstance(content, str):
+        return (Static("(content preview unavailable)", markup=False, classes="tool-body"),)
+
+    lines = content.splitlines()
+    preview = "\n".join(lines[:80])
+    lang = _lang_from_path(str(path))
+    widgets = [Static(_diff_lines(preview, lang, "+", "#57ab5a"), classes="diff-added")]
+    if len(lines) > 80:
+        widgets.append(
+            Static(f"… +{len(lines) - 80} more lines", markup=False, classes="diff-more")
+        )
+    return tuple(widgets)
+
+
+def _diff_lines(code: str, lang: str, marker: str, marker_style: str) -> RichText:
+    """Prefix each syntax-highlighted line with a +/- gutter marker."""
+    rendered = _renderable_to_text(RichSyntax(code, lang, theme="github-dark"))
+    lines = rendered.split("\n")
+    if lines and not lines[-1].plain:
+        lines.pop()
+    out = RichText()
+    for index, line in enumerate(lines):
+        out.append(f"{marker} ", style=f"bold {marker_style}")
+        out.append_text(line)
+        if index < len(lines) - 1:
+            out.append("\n")
+    return out
+
+
+_LANG_MAP = {
+    "py": "python", "js": "javascript", "ts": "typescript", "tsx": "tsx",
+    "jsx": "jsx", "rs": "rust", "go": "go", "rb": "ruby",
+    "sh": "bash", "bash": "bash", "zsh": "bash",
+    "json": "json", "toml": "toml", "yaml": "yaml", "yml": "yaml",
+    "html": "html", "css": "css", "md": "markdown", "sql": "sql",
+    "c": "c", "cpp": "cpp", "h": "c", "hpp": "cpp",
+    "java": "java", "kt": "kotlin", "swift": "swift",
+    "xml": "xml", "vue": "vue",
+}
+
+
+def _lang_from_path(path: str) -> str:
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    return _LANG_MAP.get(ext, ext or "text")
+
+
+def _renderable_to_text(renderable: RenderableType) -> RichText:
+    """Pre-render a Rich renderable to a Text object (preserves styles, enables selection).
+
+    Strips trailing whitespace per line so Textual can wrap long lines
+    when the terminal is narrower than the original render width.
+    """
+    console = RichConsole(width=500, highlight=False, force_terminal=True)
+    raw = RichText()
+    for segment in console.render(renderable):
+        if segment.control:
+            continue
+        raw.append(segment.text, style=segment.style)
+    lines = raw.split("\n")
+    result = RichText()
+    for i, line in enumerate(lines):
+        line.rstrip()
+        result.append_text(line)
+        if i < len(lines) - 1:
+            result.append("\n")
+    return result
+
+
+def _tool_label(tool_name: str, arguments: dict[str, object], *, finished: bool) -> str:
+    """Codex-style one-line tool label, tensed by execution state."""
+    if tool_name == "shell":
+        command = arguments.get("command")
+        command_text = _truncate(command, 72) if isinstance(command, str) else ""
+        verb = "Ran" if finished else "Running"
+        return f"{verb} {command_text}".rstrip()
+    path = arguments.get("path")
     if isinstance(path, str):
-        if event.tool_name == "edit_file":
-            start = event.arguments.get("start_line")
-            end = event.arguments.get("end_line")
-            return f"edit_file · {path}:{start}-{end}"
-        if event.tool_name == "read_file":
-            start = event.arguments.get("start_line", 1)
-            end = event.arguments.get("end_line")
-            suffix = f":{start}-{end}" if end is not None else f":{start}-end"
-            return f"read_file · {path}{suffix}"
-        return f"{event.tool_name} · {path}"
-    if event.tool_name == "code_search":
-        query = event.arguments.get("query")
+        if tool_name == "read_file":
+            start = arguments.get("start_line", 1)
+            end = arguments.get("end_line")
+            if end is not None:
+                path = f"{path}:{start}-{end}"
+            elif start != 1:
+                path = f"{path}:{start}-end"
+            return f"{'Read' if finished else 'Reading'} {path}"
+        if tool_name == "edit_file":
+            start = arguments.get("start_line", "?")
+            end = arguments.get("end_line", "?")
+            label = f"{'Edited' if finished else 'Editing'} {path}:{start}-{end}"
+            if finished:
+                expected = arguments.get("expected_content")
+                replacement = arguments.get("replacement")
+                if isinstance(expected, str) and isinstance(replacement, str):
+                    added = len(replacement.splitlines())
+                    removed = len(expected.splitlines())
+                    label += f" (+{added} -{removed})"
+            return label
+        if tool_name == "write_file":
+            if finished:
+                content = arguments.get("content")
+                if isinstance(content, str):
+                    return f"Wrote {path} (+{len(content.splitlines())})"
+                return f"Wrote {path}"
+            return f"Writing {path}"
+        if tool_name == "mkdir":
+            return f"{'Created' if finished else 'Creating'} directory {path}"
+        return f"{tool_name} {path}"
+    if tool_name == "code_search":
+        query = arguments.get("query")
         if isinstance(query, str):
-            return f"code_search · {_preview_text(query, 80)}"
-    return event.tool_name
+            verb = "Searched" if finished else "Searching"
+            return f'{verb} "{_truncate(query, 48)}"'
+    return tool_name
+
+
+def _truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 1]}…"
 
 
 def _tool_arguments(arguments: dict[str, object]) -> str:
     return "Input:\n" + json.dumps(_preview_value(arguments), ensure_ascii=False, indent=2)
-
-
-def _tool_body(arguments: str, result: str) -> str:
-    return f"{arguments}\n\nResult:\n{_preview_text(result or '(no output)', 12_000)}"
 
 
 def _preview_value(value: object) -> object:
