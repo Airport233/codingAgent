@@ -18,9 +18,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.timer import Timer
-from rich.console import Group as RichGroup
 from rich.markdown import Markdown as RichMarkdown
-from rich.syntax import Syntax as RichSyntax
 from rich.text import Text as RichText
 from textual.content import Content
 from textual.widgets import Collapsible, Footer, Label, OptionList, Static, TextArea
@@ -1255,15 +1253,14 @@ def _render_tool_body(
     result_text = _preview_text(result or "(no output)", 12_000)
     if tool_name == "shell":
         command = arguments.get("command")
-        parts: list[object] = []
+        text = RichText()
         if isinstance(command, str):
-            parts.append(RichText("Command:", style="bold"))
-            parts.append(RichSyntax(
-                command, "bash", theme="dracula", background_color="#0a0e13", padding=(0, 1),
-            ))
-        parts.append(RichText("Output:", style="bold"))
-        parts.append(RichText(result_text))
-        return RichGroup(*parts)
+            text.append("Command:\n", style="bold")
+            text.append(f"  {command}\n", style="#93c5fd")
+            text.append("\n")
+        text.append("Output:\n", style="bold")
+        text.append(result_text)
+        return text
     if tool_name == "edit_file":
         return _render_edit_diff(arguments, result_text)
     if tool_name == "write_file":
@@ -1287,51 +1284,40 @@ def _render_edit_diff(arguments: dict[str, object], result_text: str) -> object:
     added = len(new_lines)
     removed = len(old_lines)
 
-    parts: list[object] = []
-    parts.append(RichText(f"Edited {path} (+{added} -{removed})", style="bold"))
-    parts.append(RichText(""))
-
-    diff_lines: list[str] = []
+    diff = RichText()
+    diff.append(f"Edited {path} (+{added} -{removed})\n", style="bold")
+    diff.append("\n")
     for i, line in enumerate(old_lines):
         lineno = start_line + i
-        diff_lines.append(f"  {lineno:>4}  -{line}")
+        diff.append(f" {lineno:>4} ", style="#6b7a8d")
+        diff.append(f" -{line}\n", style="#f0a0a0 on #3c1618")
     for i, line in enumerate(new_lines):
         lineno = start_line + i
-        diff_lines.append(f"  {lineno:>4}  +{line}")
-
-    diff_text = "\n".join(diff_lines)
-    parts.append(RichSyntax(
-        diff_text, "diff", theme="dracula", background_color="#0a0e13", padding=(0, 1),
-    ))
-    return RichGroup(*parts)
+        diff.append(f" {lineno:>4} ", style="#6b7a8d")
+        diff.append(f" +{line}\n", style="#a0f0a0 on #1a3c1e")
+    return diff
 
 
 def _render_write_summary(arguments: dict[str, object], result_text: str) -> object:
-    """Render write_file with the content syntax-highlighted."""
+    """Render write_file with added-line style."""
     path = arguments.get("path", "?")
     content = arguments.get("content", "")
     if not isinstance(path, str) or not isinstance(content, str):
         return result_text
 
-    ext = path.rsplit(".", 1)[-1] if "." in path else "text"
-    lang_map = {
-        "py": "python", "js": "javascript", "ts": "typescript", "tsx": "tsx",
-        "rs": "rust", "go": "go", "rb": "ruby", "sh": "bash", "bash": "bash",
-        "json": "json", "toml": "toml", "yaml": "yaml", "yml": "yaml",
-        "html": "html", "css": "css", "md": "markdown", "sql": "sql",
-    }
-    lang = lang_map.get(ext, ext)
     lines = content.splitlines()
     added = len(lines)
+    preview_lines = lines[:80]
 
-    parts: list[object] = []
-    parts.append(RichText(f"Created {path} (+{added} lines)", style="bold"))
-    preview = content if len(content) <= 4000 else content[:4000] + "\n...[truncated]"
-    parts.append(RichSyntax(
-        preview, lang, theme="dracula", background_color="#0a0e13",
-        padding=(0, 1), line_numbers=True,
-    ))
-    return RichGroup(*parts)
+    result = RichText()
+    result.append(f"Created {path} (+{added} lines)\n", style="bold")
+    result.append("\n")
+    for i, line in enumerate(preview_lines, start=1):
+        result.append(f" {i:>4} ", style="#6b7a8d")
+        result.append(f" +{line}\n", style="#a0f0a0 on #1a3c1e")
+    if len(lines) > 80:
+        result.append(f"  ... +{len(lines) - 80} more lines\n", style="#6b7a8d")
+    return result
 
 
 def _tool_title(event: ToolStarted) -> str:
