@@ -70,7 +70,9 @@ class AgentApplication:
         shell_classifier: Callable[[ToolUseBlock], ShellRiskVerdict | None] | None = None,
         guardian_enabled: bool = False,
         skills: SkillSnapshot | None = None,
+        base_prompt: str | None = None,
     ) -> None:
+        self._base_prompt = base_prompt
         self._provider = provider
         self._dispatcher = dispatcher
         self._sessions = sessions
@@ -177,6 +179,8 @@ class AgentApplication:
         self, active_skill: SkillDefinition | None = None
     ) -> str | None:
         sections: list[str] = []
+        if self._base_prompt:
+            sections.append(self._base_prompt)
         skill_catalog = self._skills.render_catalog()
         if skill_catalog:
             sections.append(skill_catalog)
