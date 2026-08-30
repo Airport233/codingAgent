@@ -183,7 +183,6 @@ def test_default_loader_exposes_builtin_coding_workflows(tmp_path: Path) -> None
 
     assert [skill.name for skill in snapshot.skills] == [
         "code-review",
-        "github-delivery",
         "project-init",
         "project-map",
         "test-fix",

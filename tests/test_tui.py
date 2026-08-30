@@ -45,6 +45,16 @@ from coding_agent.tui import (
 pytestmark = pytest.mark.asyncio
 
 
+def _widget_text(widget: object) -> str:
+    """Extract text from a Static, handling both plain strings and Rich renderables."""
+    content = getattr(widget, "_Static__content", None)
+    if content is None:
+        return str(widget)
+    if hasattr(content, "markup"):
+        return content.markup
+    return str(content)
+
+
 async def test_slash_help_uses_one_aligned_command_per_line() -> None:
     assert format_slash_help().splitlines() == [
         "Commands:",
@@ -361,7 +371,7 @@ async def test_tui_submits_prompt_and_streams_assistant_card() -> None:
         await pilot.pause()
 
         assert "Fix the tests" in str(app.query_one(".user-message").render())
-        assert "Finished successfully." in str(app.query_one(".assistant-message").render())
+        assert "Finished successfully." in _widget_text(app.query_one(".assistant-message"))
         assert composer.value == ""
         assert composer.disabled is False
         assert app.query_one("#status-context").display is True
@@ -651,10 +661,8 @@ async def test_resume_command_opens_full_screen_picker_and_installs_selection() 
 
         assert resumed_ids == ["session-2"]
         assert app.session_id == "session-2"
-        rendered = "\n".join(
-            str(child.render()) for child in app.query_one("#conversation").children
-        )
         conversation = app.query_one("#conversation")
+        rendered = "\n".join(_widget_text(child) for child in conversation.children)
         assert conversation.children[0].id == "brand"
         assert "Selected historical task" in rendered
         assert "Historical answer" in rendered
@@ -758,7 +766,7 @@ async def test_tui_approval_screen_shows_command_and_allows_once() -> None:
         await pilot.pause()
 
         assert shell.executed is True
-        assert "done" in str(app.query_one(".assistant-message").render())
+        assert "done" in _widget_text(app.query_one(".assistant-message"))
 
 
 async def test_slash_popup_handles_plain_completion_and_no_matches() -> None:
@@ -884,9 +892,10 @@ async def test_tui_renders_collapsible_thinking_and_completed_tool_card() -> Non
         tool = app.query_one(".tool-card", Collapsible)
         assert thinking.collapsed is True
         assert thinking.title == "Thinking · complete"
-        assert "uv run pytest" in tool.title
-        assert "[tests]" in tool.title
-        assert "done" in tool.title
+        title_text = str(tool.title)
+        assert "uv run pytest" in title_text
+        assert "[tests]" in title_text
+        assert "done" in title_text
         assert '"command": "uv run pytest"' in str(tool.query_one(".tool-body").render())
         assert "Result:" in str(tool.query_one(".tool-body").render())
         assert "all green" in str(tool.query_one(".tool-body").render())
@@ -963,7 +972,7 @@ async def test_tui_replays_full_history_with_compaction_boundary_and_tool_inputs
         await pilot.pause()
 
         conversation = app.query_one("#conversation")
-        rendered = "\n".join(str(child.render()) for child in conversation.children)
+        rendered = "\n".join(_widget_text(child) for child in conversation.children)
         assert "old request that the model no longer receives verbatim" in rendered
         assert "recent request" in rendered
         assert "recent answer" in rendered
@@ -1102,8 +1111,8 @@ async def test_tui_preserves_text_and_tool_chronology() -> None:
         ]
         assert timeline == ["other", "user", "assistant", "tool", "assistant"]
         replies = app.query(".assistant-message")
-        assert "I will inspect the task." in str(replies[0].render())
-        assert "The task is complete." in str(replies[1].render())
+        assert "I will inspect the task." in _widget_text(replies[0])
+        assert "The task is complete." in _widget_text(replies[1])
 
 
 async def test_tui_slash_commands_update_state_without_leaving_full_screen() -> None:

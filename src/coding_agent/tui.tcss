@@ -40,6 +40,7 @@ Screen {
     margin-right: 5;
     background: #111821;
     border-left: thick #34d399;
+    color: #f0f4f8;
 }
 
 .notice {
@@ -72,9 +73,14 @@ Screen {
     border: round #334155;
 }
 
-.tool-body, .thinking-body {
+.tool-body {
     padding: 0 1 1 1;
     color: #b6c2d1;
+}
+
+.thinking-body {
+    padding: 0 1 1 1;
+    color: #6b7a8d;
 }
 
 #status-bar {

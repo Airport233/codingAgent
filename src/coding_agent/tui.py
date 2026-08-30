@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 import time
 from collections.abc import Awaitable, Callable
@@ -17,6 +18,8 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.timer import Timer
+from rich.markdown import Markdown as RichMarkdown
+from textual.content import Content
 from textual.widgets import Collapsible, Footer, Label, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 from textual.worker import Worker
@@ -720,7 +723,7 @@ class CodingAgentTui(App[None]):
                     if self._thinking is not None:
                         self._thinking[0].title = "Thinking · complete"
                 elif isinstance(event, ToolStarted):
-                    self._finish_assistant_segment()
+                    await self._finish_assistant_segment()
                     await self._tool_started(event)
                 elif isinstance(event, ToolFinished):
                     self._tool_finished(event)
@@ -732,11 +735,11 @@ class CodingAgentTui(App[None]):
                     await self._notice(event.message, "error")
                 elif isinstance(event, (AgentCancelled, WarningRaised)):
                     await self._notice(event.message, "warning")
-                elif isinstance(event, AgentCompleted) and self._assistant is None and event.text:
-                    self._assistant = Static(
-                        event.text, markup=False, classes="message assistant-message"
-                    )
-                    await self._mount(self._assistant)
+                elif isinstance(event, AgentCompleted):
+                    if self._assistant is not None and self._assistant_text:
+                        await self._finish_assistant_segment()
+                    elif event.text:
+                        await self._mount(_render_assistant_content(event.text))
         finally:
             self.query_one("#composer", PromptTextArea).disabled = False
             self.query_one("#composer", PromptTextArea).focus()
@@ -746,7 +749,7 @@ class CodingAgentTui(App[None]):
         body = Static(details, markup=False, classes="tool-body")
         panel = Collapsible(
             body,
-            title=f"● {_tool_title(event)} · running",
+            title=Content(f"● {_tool_title(event)} · running"),
             collapsed=True,
             classes="tool-card running",
         )
@@ -758,7 +761,7 @@ class CodingAgentTui(App[None]):
         if item is None:
             return
         panel, body, title, details = item
-        panel.title = f"{'✓' if not event.is_error else '✕'} {title} · {event.status}"
+        panel.title = Content(f"{'✓' if not event.is_error else '✕'} {title} · {event.status}")
         panel.remove_class("running")
         panel.add_class("failed" if event.is_error else "succeeded")
         body.update(_tool_body(details, event.content))
@@ -1026,8 +1029,11 @@ class CodingAgentTui(App[None]):
         self._thinking_text = ""
         self._tools = {}
 
-    def _finish_assistant_segment(self) -> None:
-        """Make later text render after the event that ended this segment."""
+    async def _finish_assistant_segment(self) -> None:
+        """Replace streaming plain-text with rendered Markdown when it contains formatting."""
+        if self._assistant is not None and self._assistant_text:
+            if _has_markdown_formatting(self._assistant_text):
+                self._assistant.update(RichMarkdown(self._assistant_text))
         self._assistant = None
         self._assistant_text = ""
 
@@ -1082,9 +1088,7 @@ class CodingAgentTui(App[None]):
         result_by_id = {result.tool_use_id: result for result in results}
         for block in exchange.blocks:
             if isinstance(block, TextBlock) and block.text:
-                await self._mount(
-                    Static(block.text, markup=False, classes="message assistant-message")
-                )
+                await self._mount(_render_assistant_content(block.text))
             elif isinstance(block, ThinkingBlock):
                 body = Static(block.thinking or "(empty)", markup=False, classes="thinking-body")
                 await self._mount(
@@ -1128,7 +1132,7 @@ class CodingAgentTui(App[None]):
         status = "interrupted" if result is None else ("error" if result.is_error else "done")
         panel = Collapsible(
             body,
-            title=f"{'✕' if failed else '✓'} {title} · {status}",
+            title=Content(f"{'✕' if failed else '✓'} {title} · {status}"),
             collapsed=True,
             classes="tool-card failed" if failed else "tool-card succeeded",
         )
@@ -1213,6 +1217,27 @@ class CodingAgentTui(App[None]):
             self._turn_worker.cancel()
         await self.application.close_session()
         self.exit()
+
+
+_MD_PATTERN = re.compile(
+    r"```"           # fenced code block
+    r"|^#{1,6}\s"    # heading
+    r"|^\*\s"        # unordered list
+    r"|^\d+\.\s"     # ordered list
+    r"|\*\*.+\*\*"   # bold
+    r"|`.+`",        # inline code
+    re.MULTILINE,
+)
+
+
+def _has_markdown_formatting(text: str) -> bool:
+    return _MD_PATTERN.search(text) is not None
+
+
+def _render_assistant_content(text: str) -> Static:
+    if _has_markdown_formatting(text):
+        return Static(RichMarkdown(text), classes="message assistant-message")
+    return Static(text, markup=False, classes="message assistant-message")
 
 
 def _tool_title(event: ToolStarted) -> str:
