@@ -494,7 +494,9 @@ class CodingAgentTui(App[None]):
         if self._turn_worker is not None and self._turn_worker.is_running:
             await self._notice("A turn is already running. Press Ctrl+C to cancel it.", "warning")
             return
-        await self._mount(Static(prompt, markup=False, classes="message user-message"))
+        await self._mount(
+            Static(prompt, markup=False, classes="message user-message"), force_scroll=True
+        )
         self._prompt_history.append(history_prompt or prompt)
         self._history_index = None
         self._last_history_text = None
@@ -998,10 +1000,12 @@ class CodingAgentTui(App[None]):
         self._last_history_text = None
         await self._render_recovered_history()
 
-    async def _mount(self, widget: Static | Collapsible) -> None:
+    async def _mount(self, widget: Static | Collapsible, *, force_scroll: bool = False) -> None:
         conversation = self.query_one("#conversation", VerticalScroll)
+        was_at_bottom = conversation.is_vertical_scroll_end
         await conversation.mount(widget)
-        conversation.scroll_end(animate=False)
+        if force_scroll or was_at_bottom:
+            conversation.scroll_end(animate=False)
 
     def _conversation_at_bottom(self) -> bool:
         return self.query_one("#conversation", VerticalScroll).is_vertical_scroll_end

@@ -1007,6 +1007,59 @@ async def test_streaming_text_follows_the_bottom_unless_the_user_scrolled_away()
         assert conversation.is_vertical_scroll_end is False
 
 
+async def test_newly_mounted_agent_widget_does_not_yank_a_scrolled_up_view() -> None:
+    class DelayedToolProvider:
+        def __init__(self) -> None:
+            self.release = asyncio.Event()
+
+        async def stream(
+            self,
+            conversation: tuple[ConversationExchange, ...],
+            tools: tuple[ToolSpec, ...],
+            system_instructions: str | None = None,
+        ) -> AsyncIterator[ProviderEvent]:
+            del conversation, tools, system_instructions
+            yield ProviderTextDelta(text="padding line\n" * 40)
+            await self.release.wait()
+            yield ProviderResponseFinished(
+                AssistantExchange(
+                    (
+                        TextBlock("padding line\n" * 40),
+                        ToolUseBlock("call-1", "shell", {"command": "echo hi"}),
+                    ),
+                    "tool_use",
+                )
+            )
+
+    provider = DelayedToolProvider()
+    app = CodingAgentTui(
+        AgentApplication(provider, ToolDispatcher(ToolCatalog({})), InMemorySessionStore()),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test(size=(80, 20)) as pilot:
+        app.query_one("#composer").value = "Go"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        conversation = app.query_one("#conversation", VerticalScroll)
+        assert conversation.is_vertical_scroll_end is True
+
+        conversation.scroll_home(animate=False)
+        await pilot.pause()
+        scroll_y_before = conversation.scroll_y
+        assert conversation.is_vertical_scroll_end is False
+
+        provider.release.set()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert conversation.scroll_y == scroll_y_before
+        assert conversation.is_vertical_scroll_end is False
+
+
 async def test_tui_replays_full_history_with_compaction_boundary_and_tool_inputs() -> None:
     tool_call = ToolUseBlock(
         "write-1",
