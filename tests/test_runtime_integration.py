@@ -578,6 +578,10 @@ async def test_runtime_resume_restores_the_latest_compaction_checkpoint(tmp_path
         not isinstance(exchange, UserExchange) or "long question 0" not in exchange.content
         for exchange in request
     )
+    # The base system prompt is generated fresh outside the compactable exchange
+    # history, so it must reach the model in full after a compaction + resume.
+    assert str(settings.workspace) in resumed_provider.system_instructions[0]
+    assert "relative to the working directory" in resumed_provider.system_instructions[0]
 
 
 @pytest.mark.asyncio
