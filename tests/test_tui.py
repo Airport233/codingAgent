@@ -1042,7 +1042,7 @@ async def test_thinking_card_finish_reports_elapsed_time() -> None:
         card = ThinkingCard(running=True)
         card.finish(2.4)
         assert "Thought for 2s" in card._title_renderable().plain
-        assert "✻" in card._title_renderable().plain
+        assert "•" in card._title_renderable().plain
         card.finish(9.0)  # idempotent: already settled
         assert "Thought for 2s" in card._title_renderable().plain
 
@@ -1365,6 +1365,38 @@ async def test_tui_replays_full_history_with_compaction_boundary_and_tool_inputs
         assert composer.value == "recent request"
         await pilot.press("up")
         assert composer.value == "old request that the model no longer receives verbatim"
+
+
+async def test_recovered_thinking_card_has_no_spinner() -> None:
+    """Recovered history thinking must be static (no live timer, no braille frames)."""
+    history = (
+        UserExchange("older question"),
+        AssistantExchange(
+            (ThinkingBlock("old reasoning"), TextBlock("old answer")),
+            "end_turn",
+        ),
+    )
+    app = CodingAgentTui(
+        AgentApplication(
+            FakeProvider([]),
+            ToolDispatcher(ToolCatalog({})),
+            InMemorySessionStore(),
+            initial_exchanges=history,
+        ),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        card = app.query_one(".thinking-card", ThinkingCard)
+        title = card.query_one(".thinking-title").render().plain
+        assert title.startswith("•")
+        assert card._timer is None
+        await asyncio.sleep(0.3)
+        await pilot.pause()
+        assert card.query_one(".thinking-title").render().plain == title
 
 
 async def test_manual_compaction_shows_indeterminate_progress_until_provider_finishes() -> None:

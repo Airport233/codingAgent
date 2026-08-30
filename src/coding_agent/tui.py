@@ -413,7 +413,7 @@ class ThinkingCard(Vertical):
         self._title_text = title
         self._full_text = full_text
         self._expanded = False
-        self._running = running
+        self._streaming = running
         self._frame = 0
         self._timer: Timer | None = None
         self._title_widget = Static("", classes="thinking-title")
@@ -429,7 +429,7 @@ class ThinkingCard(Vertical):
         yield self._body_widget
 
     def on_mount(self) -> None:
-        if self._running:
+        if self._streaming:
             self._timer = self.set_interval(0.12, self._tick)
 
     def on_unmount(self) -> None:
@@ -446,11 +446,11 @@ class ThinkingCard(Vertical):
 
     def _title_renderable(self) -> RichText:
         text = RichText()
-        if self._running:
+        if self._streaming:
             text.append(f"{self.FRAMES[self._frame]} ", style="#a78bfa")
             text.append(self._title_text, style="#a78bfa")
         else:
-            text.append("✻ ", style="#a78bfa")
+            text.append("• ", style="#a78bfa")
             text.append(self._title_text, style="#8b98ab")
         return text
 
@@ -466,9 +466,9 @@ class ThinkingCard(Vertical):
 
     def finish(self, seconds: float | None = None) -> None:
         """Settle the panel into its final past-tense state. Idempotent."""
-        if not self._running:
+        if not self._streaming:
             return
-        self._running = False
+        self._streaming = False
         self._stop_timer()
         if seconds is None:
             self._title_text = "Thought"
@@ -1294,6 +1294,8 @@ class CodingAgentTui(App[None]):
         )
 
     def _reset_turn_widgets(self) -> None:
+        if self._thinking is not None:
+            self._thinking.finish()
         self._assistant = None
         self._assistant_text = ""
         self._thinking = None
