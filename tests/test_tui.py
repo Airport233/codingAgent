@@ -900,8 +900,7 @@ async def test_tui_renders_collapsible_thinking_and_completed_tool_card() -> Non
         assert thinking.collapsed is True
         assert thinking.title == "Thinking · complete"
         title_text = str(tool.title)
-        assert "uv run pytest" in title_text
-        assert "[tests]" in title_text
+        assert "local bash" in title_text
         assert "done" in title_text
         tool_body = _widget_text(tool.query_one(".tool-body"))
         assert "uv run pytest" in tool_body

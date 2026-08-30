@@ -1256,11 +1256,10 @@ def _render_tool_body(
         parts: list[object] = []
         if isinstance(command, str):
             parts.append(RichText("Command:", style="bold"))
-            parts.append(RichSyntax(command, "bash", theme="monokai", padding=(0, 1)))
-        else:
-            parts.append(RichText(args_text, style="dim"))
-        parts.append(RichText(""))
-        parts.append(RichText("Result:", style="bold"))
+            parts.append(RichSyntax(
+                command, "bash", theme="dracula", background_color="#0a0e13", padding=(0, 1),
+            ))
+        parts.append(RichText("Output:", style="bold"))
         parts.append(RichText(result_text))
         return RichGroup(*parts)
     return f"{args_text}\n\nResult:\n{result_text}"
@@ -1268,9 +1267,7 @@ def _render_tool_body(
 
 def _tool_title(event: ToolStarted) -> str:
     if event.tool_name == "shell":
-        command = event.arguments.get("command")
-        cwd = event.arguments.get("cwd", ".")
-        return f"shell [{cwd}] $ {command}" if isinstance(command, str) else "shell"
+        return "local bash"
     path = event.arguments.get("path")
     if isinstance(path, str):
         if event.tool_name == "edit_file":
