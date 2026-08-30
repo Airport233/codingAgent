@@ -1248,7 +1248,7 @@ def _render_assistant_content(text: str) -> Static:
 def _render_tool_body(
     tool_name: str, arguments: dict[str, object], result: str
 ) -> object:
-    """Return a Rich renderable for the tool body. Shell tools get syntax highlighting."""
+    """Return a Rich renderable for the tool body."""
     args_text = _tool_arguments(arguments)
     result_text = _preview_text(result or "(no output)", 12_000)
     if tool_name == "shell":
@@ -1262,7 +1262,74 @@ def _render_tool_body(
         parts.append(RichText("Output:", style="bold"))
         parts.append(RichText(result_text))
         return RichGroup(*parts)
+    if tool_name == "edit_file":
+        return _render_edit_diff(arguments, result_text)
+    if tool_name == "write_file":
+        return _render_write_summary(arguments, result_text)
     return f"{args_text}\n\nResult:\n{result_text}"
+
+
+def _render_edit_diff(arguments: dict[str, object], result_text: str) -> object:
+    """Render edit_file as a Codex-style inline diff."""
+    path = arguments.get("path", "?")
+    start_line = arguments.get("start_line", 1)
+    expected = arguments.get("expected_content", "")
+    replacement = arguments.get("replacement", "")
+    if not isinstance(start_line, int):
+        start_line = 1
+    if not isinstance(expected, str) or not isinstance(replacement, str):
+        return result_text
+
+    old_lines = expected.splitlines()
+    new_lines = replacement.splitlines()
+    added = len(new_lines)
+    removed = len(old_lines)
+
+    parts: list[object] = []
+    parts.append(RichText(f"Edited {path} (+{added} -{removed})", style="bold"))
+    parts.append(RichText(""))
+
+    diff_lines: list[str] = []
+    for i, line in enumerate(old_lines):
+        lineno = start_line + i
+        diff_lines.append(f"  {lineno:>4}  -{line}")
+    for i, line in enumerate(new_lines):
+        lineno = start_line + i
+        diff_lines.append(f"  {lineno:>4}  +{line}")
+
+    diff_text = "\n".join(diff_lines)
+    parts.append(RichSyntax(
+        diff_text, "diff", theme="dracula", background_color="#0a0e13", padding=(0, 1),
+    ))
+    return RichGroup(*parts)
+
+
+def _render_write_summary(arguments: dict[str, object], result_text: str) -> object:
+    """Render write_file with the content syntax-highlighted."""
+    path = arguments.get("path", "?")
+    content = arguments.get("content", "")
+    if not isinstance(path, str) or not isinstance(content, str):
+        return result_text
+
+    ext = path.rsplit(".", 1)[-1] if "." in path else "text"
+    lang_map = {
+        "py": "python", "js": "javascript", "ts": "typescript", "tsx": "tsx",
+        "rs": "rust", "go": "go", "rb": "ruby", "sh": "bash", "bash": "bash",
+        "json": "json", "toml": "toml", "yaml": "yaml", "yml": "yaml",
+        "html": "html", "css": "css", "md": "markdown", "sql": "sql",
+    }
+    lang = lang_map.get(ext, ext)
+    lines = content.splitlines()
+    added = len(lines)
+
+    parts: list[object] = []
+    parts.append(RichText(f"Created {path} (+{added} lines)", style="bold"))
+    preview = content if len(content) <= 4000 else content[:4000] + "\n...[truncated]"
+    parts.append(RichSyntax(
+        preview, lang, theme="dracula", background_color="#0a0e13",
+        padding=(0, 1), line_numbers=True,
+    ))
+    return RichGroup(*parts)
 
 
 def _tool_title(event: ToolStarted) -> str:

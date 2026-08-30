@@ -984,9 +984,9 @@ async def test_tui_replays_full_history_with_compaction_boundary_and_tool_inputs
         assert "recent answer" in rendered
         assert "Context compacted here" in rendered
         assert "compacted" in str(app.query_one("#status-context").render())
-        tool_body = str(app.query_one(".tool-body").render())
+        tool_body = _widget_text(app.query_one(".tool-body"))
         assert "print('visible after resume')" in tool_body
-        assert "Created hello.py (30 bytes)" in tool_body
+        assert "hello.py" in tool_body
 
         composer = app.query_one("#composer", PromptTextArea)
         await pilot.press("up")
