@@ -18,7 +18,9 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.timer import Timer
+from rich.console import Group as RichGroup
 from rich.markdown import Markdown as RichMarkdown
+from rich.syntax import Syntax as RichSyntax
 from rich.text import Text as RichText
 from textual.content import Content
 from textual.widgets import Collapsible, Footer, Label, OptionList, Static, TextArea
@@ -1283,23 +1285,25 @@ def _render_edit_diff(arguments: dict[str, object], result_text: str) -> object:
     new_lines = replacement.splitlines()
     added = len(new_lines)
     removed = len(old_lines)
+    lang = _lang_from_path(path)
 
-    diff = RichText()
-    diff.append(f"Edited {path} (+{added} -{removed})\n", style="bold")
-    diff.append("\n")
-    for i, line in enumerate(old_lines):
-        lineno = start_line + i
-        diff.append(f" {lineno:>4} ", style="#6b7a8d")
-        diff.append(f" -{line}\n", style="#f0a0a0 on #3c1618")
-    for i, line in enumerate(new_lines):
-        lineno = start_line + i
-        diff.append(f" {lineno:>4} ", style="#6b7a8d")
-        diff.append(f" +{line}\n", style="#a0f0a0 on #1a3c1e")
-    return diff
+    parts: list[object] = []
+    parts.append(RichText(f"Edited {path} (+{added} -{removed})\n", style="bold"))
+    if old_lines:
+        parts.append(RichSyntax(
+            expected, lang, theme="dracula", background_color="#2d1214",
+            line_numbers=True, start_line=start_line,
+        ))
+    if new_lines:
+        parts.append(RichSyntax(
+            replacement, lang, theme="dracula", background_color="#122d14",
+            line_numbers=True, start_line=start_line,
+        ))
+    return RichGroup(*parts)
 
 
 def _render_write_summary(arguments: dict[str, object], result_text: str) -> object:
-    """Render write_file with added-line style."""
+    """Render write_file with syntax-highlighted content on green background."""
     path = arguments.get("path", "?")
     content = arguments.get("content", "")
     if not isinstance(path, str) or not isinstance(content, str):
@@ -1307,17 +1311,35 @@ def _render_write_summary(arguments: dict[str, object], result_text: str) -> obj
 
     lines = content.splitlines()
     added = len(lines)
-    preview_lines = lines[:80]
-
-    result = RichText()
-    result.append(f"Created {path} (+{added} lines)\n", style="bold")
-    result.append("\n")
-    for i, line in enumerate(preview_lines, start=1):
-        result.append(f" {i:>4} ", style="#6b7a8d")
-        result.append(f" +{line}\n", style="#a0f0a0 on #1a3c1e")
+    preview = "\n".join(lines[:80])
     if len(lines) > 80:
-        result.append(f"  ... +{len(lines) - 80} more lines\n", style="#6b7a8d")
-    return result
+        preview += f"\n# ... +{len(lines) - 80} more lines"
+    lang = _lang_from_path(path)
+
+    parts: list[object] = []
+    parts.append(RichText(f"Created {path} (+{added} lines)\n", style="bold"))
+    parts.append(RichSyntax(
+        preview, lang, theme="dracula", background_color="#122d14",
+        line_numbers=True,
+    ))
+    return RichGroup(*parts)
+
+
+_LANG_MAP = {
+    "py": "python", "js": "javascript", "ts": "typescript", "tsx": "tsx",
+    "jsx": "jsx", "rs": "rust", "go": "go", "rb": "ruby",
+    "sh": "bash", "bash": "bash", "zsh": "bash",
+    "json": "json", "toml": "toml", "yaml": "yaml", "yml": "yaml",
+    "html": "html", "css": "css", "md": "markdown", "sql": "sql",
+    "c": "c", "cpp": "cpp", "h": "c", "hpp": "cpp",
+    "java": "java", "kt": "kotlin", "swift": "swift",
+    "xml": "xml", "vue": "vue",
+}
+
+
+def _lang_from_path(path: str) -> str:
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    return _LANG_MAP.get(ext, ext or "text")
 
 
 def _tool_title(event: ToolStarted) -> str:
