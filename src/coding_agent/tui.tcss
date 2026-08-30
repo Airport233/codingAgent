@@ -95,9 +95,23 @@ Screen {
     color: #f0f4f8;
 }
 
+.thinking-title {
+    padding: 0 1;
+    color: #6b7a8d;
+    text-style: bold;
+}
+
 .thinking-body {
     padding: 0 1 0 1;
     color: #6b7a8d;
+    height: 3;
+    overflow: hidden;
+}
+
+.thinking-body.expanded {
+    height: auto;
+    max-height: 30;
+    overflow-y: auto;
 }
 
 #status-bar {

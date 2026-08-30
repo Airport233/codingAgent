@@ -899,10 +899,10 @@ async def test_tui_renders_collapsible_thinking_and_completed_tool_card() -> Non
         await pilot.press("enter")
         await pilot.pause()
 
-        thinking = app.query_one(".thinking-card", Collapsible)
+        thinking = app.query_one(".thinking-card", Vertical)
         tool = app.query_one(".tool-card", Collapsible)
-        assert thinking.collapsed is False
-        assert thinking.title == "Thinking · complete"
+        thinking_title = _widget_text(thinking.query_one(".thinking-title"))
+        assert "complete" in thinking_title
         title_text = str(tool.title)
         assert "local bash" in title_text
         assert "done" in title_text
@@ -944,18 +944,19 @@ async def test_thinking_panel_auto_expands_while_streaming_and_collapses_when_do
         await pilot.press("enter")
         await pilot.pause()
 
-        thinking = app.query_one(".thinking-card", Collapsible)
-        assert thinking.collapsed is False
+        thinking = app.query_one(".thinking-card", Vertical)
+        # Compact mode: body shows only last 3 lines during streaming
         assert "step one" in _widget_text(thinking.query_one(".thinking-body"))
+        # Body has fixed height (compact), not expanded
+        assert not thinking.query_one(".thinking-body").has_class("expanded")
 
         provider.release.set()
         await pilot.pause()
         await pilot.pause()
 
-        # Panel stays expanded (auto-collapse was removed because it
-        # triggers a layout pass that yanks scrolled-up users).
-        assert thinking.collapsed is False
-        assert thinking.title == "Thinking · complete"
+        # Panel title changes to "complete", stays in compact mode
+        assert "complete" in _widget_text(thinking.query_one(".thinking-title"))
+        assert not thinking.query_one(".thinking-body").has_class("expanded")
 
 
 async def test_second_thinking_panel_does_not_replay_the_first_ones_text() -> None:

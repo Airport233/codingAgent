@@ -435,7 +435,7 @@ class CodingAgentTui(App[None]):
         self._turn_worker: Worker[None] | None = None
         self._assistant: Static | None = None
         self._assistant_text = ""
-        self._thinking: tuple[Collapsible, Static] | None = None
+        self._thinking: tuple[Vertical, Static] | None = None
         self._thinking_text = ""
         self._tools: dict[str, tuple[Collapsible, Static, str, str, str, dict[str, object]]] = {}
         self._completion_mode: Literal["commands", "models", "skills"] | None = None
@@ -740,10 +740,9 @@ class CodingAgentTui(App[None]):
                 elif isinstance(event, ThinkingStarted):
                     self._thinking_text = ""
                     body = Static("Working…", markup=False, classes="thinking-body")
-                    panel = Collapsible(
+                    panel = Vertical(
+                        Static("Thinking · working", classes="thinking-title"),
                         body,
-                        title="Thinking · working",
-                        collapsed=False,
                         classes="thinking-card",
                     )
                     self._thinking = (panel, body)
@@ -752,15 +751,13 @@ class CodingAgentTui(App[None]):
                     at_bottom = self._conversation_at_bottom()
                     self._thinking_text += event.text
                     if self._thinking is not None:
-                        self._thinking[1].update(self._thinking_text or "Working…")
+                        self._thinking[1].update(self._thinking_display_text())
                         self._follow_bottom_if(at_bottom)
                 elif isinstance(event, ThinkingFinished):
                     if self._thinking is not None:
-                        self._thinking[0].title = "Thinking · complete"
-                        # Note: we intentionally do NOT auto-collapse here.
-                        # Collapsing a Collapsible triggers a layout pass that
-                        # adjusts scroll_y, yanking users who scrolled up.
-                        # The user can collapse manually via Ctrl+T.
+                        self._thinking[0].query_one(".thinking-title", Static).update(
+                            "Thinking · complete"
+                        )
                 elif isinstance(event, ToolStarted):
                     await self._finish_assistant_segment()
                     await self._tool_started(event)
@@ -1156,22 +1153,26 @@ class CodingAgentTui(App[None]):
             if isinstance(block, TextBlock) and block.text:
                 await self._mount(_render_assistant_content(block.text))
             elif isinstance(block, ThinkingBlock):
-                body = Static(block.thinking or "(empty)", markup=False, classes="thinking-body")
+                body = Static(
+                    block.thinking or "(empty)", markup=False, classes="thinking-body"
+                )
                 await self._mount(
-                    Collapsible(
+                    Vertical(
+                        Static("Thinking · recovered", classes="thinking-title"),
                         body,
-                        title="Thinking · recovered",
-                        collapsed=not self.thinking_visible,
                         classes="thinking-card",
                     )
                 )
             elif isinstance(block, RedactedThinkingBlock):
-                body = Static("Provider-redacted thinking", markup=False, classes="thinking-body")
+                body = Static(
+                    "Provider-redacted thinking",
+                    markup=False,
+                    classes="thinking-body",
+                )
                 await self._mount(
-                    Collapsible(
+                    Vertical(
+                        Static("Thinking · redacted", classes="thinking-title"),
                         body,
-                        title="Thinking · redacted",
-                        collapsed=True,
                         classes="thinking-card",
                     )
                 )
@@ -1204,10 +1205,28 @@ class CodingAgentTui(App[None]):
         )
         await self._mount(panel)
 
+    def _thinking_display_text(self) -> str:
+        """Return the text to show in the thinking body: last 3 lines in
+        compact mode, full text when expanded."""
+        if not self._thinking_text:
+            return "Working…"
+        if self.thinking_visible:
+            return self._thinking_text
+        lines = self._thinking_text.splitlines()
+        return "\n".join(lines[-3:]) if len(lines) > 3 else self._thinking_text
+
     async def action_toggle_thinking(self) -> None:
         self.thinking_visible = not self.thinking_visible
         if self._thinking is not None:
-            self._thinking[0].collapsed = not self.thinking_visible
+            body = self._thinking[1]
+            if self.thinking_visible:
+                body.add_class("expanded")
+                body.update(self._thinking_text or "Working…")
+                # Don't yank the view when the user expands to read.
+                self._stick_to_bottom = False
+            else:
+                body.remove_class("expanded")
+                body.update(self._thinking_display_text())
         state = "shown" if self.thinking_visible else "hidden"
         await self._notice(f"Thinking details: {state}.", "info")
 
