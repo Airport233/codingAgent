@@ -22,10 +22,11 @@ from coding_agent.providers.base import (
     ProviderThinkingDelta,
     ProviderThinkingSignatureDelta,
     ProviderUsageUpdated,
+    RetryableProviderError,
 )
 
 
-class AnthropicProtocolError(ValueError):
+class AnthropicProtocolError(RetryableProviderError, ValueError):
     """Raised when a stream cannot be converted without inventing protocol data."""
 
 
@@ -155,7 +156,9 @@ class AnthropicStreamAggregator:
             try:
                 parsed = json.loads("".join(slot.input_json_parts))
             except json.JSONDecodeError as error:
-                raise AnthropicProtocolError("invalid tool input JSON") from error
+                raise AnthropicProtocolError(
+                    "invalid tool input JSON", code="invalid_tool_input_json"
+                ) from error
         else:
             parsed = raw.get("input", {})
         if not isinstance(parsed, dict):
