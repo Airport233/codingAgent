@@ -104,7 +104,8 @@ Screen {
 .thinking-body {
     padding: 0 1 0 1;
     color: #6b7a8d;
-    height: 3;
+    height: auto;
+    max-height: 3;
     overflow: hidden;
 }
 
