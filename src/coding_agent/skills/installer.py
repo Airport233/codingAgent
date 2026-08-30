@@ -46,6 +46,9 @@ class SkillInstaller:
 
         before = self._existing_skill_names()
         try:
+            # npx discovers its install target from the process cwd; run it
+            # from the same project root the loader scans so install and
+            # discovery can never disagree.
             process = await asyncio.create_subprocess_exec(
                 "npx",
                 "-y",
@@ -55,6 +58,7 @@ class SkillInstaller:
                 "--all",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                cwd=self._project_dir.parent.parent,
             )
         except FileNotFoundError:
             return InstallResult((), "npx is not available on PATH.")

@@ -60,7 +60,7 @@ from coding_agent.events import (
     ToolStarted,
     WarningRaised,
 )
-from coding_agent.runtime import RuntimeConfigurationError
+from coding_agent.runtime import RuntimeConfigurationError, discover_project_root
 from coding_agent.sessions.jsonl import SessionSummary
 from coding_agent.skills import format_skill_list
 from coding_agent.skills.installer import SkillInstaller
@@ -1433,7 +1433,7 @@ class CodingAgentTui(App[None]):
 
         return SkillInstaller(
             user_dir=user_data_path("codingAgent") / "skills",
-            project_dir=Path(self.workspace).expanduser() / ".agents" / "skills",
+            project_dir=discover_project_root(Path(self.workspace)) / ".agents" / "skills",
         )
 
     async def _install_skill(self, source: str) -> None:
