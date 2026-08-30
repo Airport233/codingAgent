@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel
 from textual.containers import Vertical, VerticalScroll
-from textual.widgets import Collapsible, Label, OptionList
+from textual.widgets import Label, OptionList
 
 import coding_agent.tui as tui_module
 from coding_agent.application import AgentApplication
@@ -44,6 +44,8 @@ from coding_agent.tui import (
     CompactionProgress,
     PromptTextArea,
     ResumeSessionScreen,
+    ThinkingCard,
+    ToolCard,
     format_slash_help,
 )
 
@@ -902,15 +904,156 @@ async def test_tui_renders_collapsible_thinking_and_completed_tool_card() -> Non
         await pilot.pause()
 
         thinking = app.query_one(".thinking-card", Vertical)
-        tool = app.query_one(".tool-card", Collapsible)
+        tool = app.query_one(".tool-card", ToolCard)
         thinking_title = _widget_text(thinking.query_one(".thinking-title"))
-        assert "complete" in thinking_title
-        title_text = str(tool.title)
-        assert "local bash" in title_text
-        assert "done" in title_text
+        assert "Thought" in thinking_title
+        title_text = _widget_text(tool.query_one(".tool-title"))
+        assert "✓" in title_text
+        assert "Ran uv run pytest" in title_text
         tool_body = _widget_text(tool.query_one(".tool-body"))
         assert "uv run pytest" in tool_body
         assert "all green" in tool_body
+
+
+async def test_tool_card_runs_then_settles_and_toggles_on_title_click() -> None:
+    release = asyncio.Event()
+
+    class ShellInput(BaseModel):
+        command: str
+        cwd: str = "."
+
+    class SlowShell:
+        name = "shell"
+        description = "Run a test command"
+        input_model = ShellInput
+
+        async def execute(self, arguments: BaseModel) -> ToolOutput:
+            await release.wait()
+            return ToolOutput("ok")
+
+    provider = FakeProvider(
+        [
+            AssistantExchange(
+                (ToolUseBlock("call-1", "shell", {"command": "make test"}),),
+                "tool_use",
+            ),
+            AssistantExchange((TextBlock("done"),), "end_turn"),
+        ]
+    )
+    app = CodingAgentTui(
+        AgentApplication(
+            provider,
+            ToolDispatcher(ToolCatalog({"shell": SlowShell()})),
+            InMemorySessionStore(),
+        ),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        app.query_one("#composer").value = "Run tests"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        card = app.query_one(".tool-card", ToolCard)
+        assert card.pending
+        assert "Running make test" in _widget_text(card.query_one(".tool-title"))
+        assert app.query_one(".tool-body-wrap").display is False
+
+        release.set()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert not card.pending
+        title = _widget_text(card.query_one(".tool-title"))
+        assert "✓" in title
+        assert "Ran make test" in title
+
+        # Shell bodies stay collapsed by default; clicking the title toggles.
+        assert app.query_one(".tool-body-wrap").display is False
+        await pilot.click(".tool-title")
+        await pilot.pause()
+        assert app.query_one(".tool-body-wrap").display is True
+        await pilot.click(".tool-title")
+        await pilot.pause()
+        assert app.query_one(".tool-body-wrap").display is False
+
+
+async def test_cancelled_turn_marks_pending_tool_card_interrupted() -> None:
+    class ShellInput(BaseModel):
+        command: str
+        cwd: str = "."
+
+    class HangingShell:
+        name = "shell"
+        description = "Run a test command"
+        input_model = ShellInput
+
+        async def execute(self, arguments: BaseModel) -> ToolOutput:
+            await asyncio.Event().wait()
+            return ToolOutput("unreachable")
+
+    provider = FakeProvider(
+        [
+            AssistantExchange(
+                (ToolUseBlock("call-1", "shell", {"command": "make test"}),),
+                "tool_use",
+            ),
+        ]
+    )
+    app = CodingAgentTui(
+        AgentApplication(
+            provider,
+            ToolDispatcher(ToolCatalog({"shell": HangingShell()})),
+            InMemorySessionStore(),
+        ),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        app.query_one("#composer").value = "Run tests"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        card = app.query_one(".tool-card", ToolCard)
+        assert card.pending
+
+        await app.action_cancel_turn()
+        for _ in range(6):
+            await pilot.pause()
+
+        title = _widget_text(card.query_one(".tool-title"))
+        assert "✕" in title
+        assert "cancelled" in title
+
+
+async def test_thinking_card_finish_reports_elapsed_time() -> None:
+    app = CodingAgentTui(
+        application_with_response(),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test():
+        card = ThinkingCard(running=True)
+        card.finish(2.4)
+        assert "Thought for 2s" in card._title_renderable().plain
+        assert "✻" in card._title_renderable().plain
+        card.finish(9.0)  # idempotent: already settled
+        assert "Thought for 2s" in card._title_renderable().plain
+
+        quick = ThinkingCard(running=True)
+        quick.finish(0.2)
+        assert "Thought for a moment" in quick._title_renderable().plain
+
+        recovered = ThinkingCard("Thought")
+        recovered.finish(3.0)  # no-op: never running
+        assert "Thought" in recovered._title_renderable().plain
+        assert "3s" not in recovered._title_renderable().plain
 
 
 async def test_thinking_panel_auto_expands_while_streaming_and_collapses_when_done() -> None:
@@ -956,8 +1099,8 @@ async def test_thinking_panel_auto_expands_while_streaming_and_collapses_when_do
         await pilot.pause()
         await pilot.pause()
 
-        # Panel title changes to "complete", stays in compact mode
-        assert "complete" in _widget_text(thinking.query_one(".thinking-title"))
+        # Panel title changes to past-tense "Thought", stays in compact mode
+        assert "Thought" in _widget_text(thinking.query_one(".thinking-title"))
         assert not thinking.query_one(".thinking-body").has_class("expanded")
 
 
@@ -1031,6 +1174,11 @@ async def test_second_thinking_panel_does_not_replay_the_first_ones_text() -> No
         assert "first reasoning" in first_text
         assert "first reasoning" not in second_text
         assert "second reasoning" in second_text
+
+
+async def test_streaming_text_growth_does_not_yank_a_scrolled_up_view() -> None:
+    """In-place growth while the user has scrolled up must keep the viewport put."""
+
     class StreamingTextProvider:
         def __init__(self) -> None:
             self.release = asyncio.Event()
@@ -1209,7 +1357,7 @@ async def test_tui_replays_full_history_with_compaction_boundary_and_tool_inputs
         assert "recent answer" in rendered
         assert "Context compacted here" in rendered
         assert "compacted" in str(app.query_one("#status-context").render())
-        assert "hello.py" in _widget_text(app.query_one(".diff-header"))
+        assert "Wrote hello.py" in _widget_text(app.query_one(".tool-title"))
         assert "print('visible after resume')" in _widget_text(app.query_one(".diff-added"))
 
         composer = app.query_one("#composer", PromptTextArea)

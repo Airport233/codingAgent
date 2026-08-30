@@ -49,7 +49,7 @@ Screen {
 
 .bullet {
     width: 2;
-    color: #6b7a8d;
+    color: #7dd3fc;
     padding: 1 0 0 0;
 }
 
@@ -74,44 +74,52 @@ Screen {
     color: #34d399;
 }
 
-.tool-card, .thinking-card {
+.tool-title {
+    height: 1;
+    color: #d7dde5;
 }
 
-.tool-card CollapsibleTitle {
-    color: #6b7a8d;
+.tool-body-wrap {
+    height: auto;
 }
 
 .tool-body {
-    padding: 0 1 1 1;
-    color: #b6c2d1;
+    padding: 0 1 0 2;
+    color: #8b98ab;
 }
 
-.diff-header {
-    padding: 0 1;
-    color: #f0f4f8;
+.error-output {
+    color: #fb7185;
 }
 
 .diff-removed {
     padding: 0 1;
-    background: #2d1214;
+    background: #2e1a1e;
     color: #f0f4f8;
 }
 
 .diff-added {
     padding: 0 1;
-    background: #122d14;
+    background: #182a1d;
     color: #f0f4f8;
 }
 
-.thinking-title {
-    padding: 0 1;
+.diff-more {
+    padding: 0 1 0 2;
     color: #6b7a8d;
-    text-style: bold;
+    text-style: italic;
+}
+
+.thinking-title {
+    height: 1;
+    padding: 0 1;
+    color: #8b98ab;
 }
 
 .thinking-body {
-    padding: 0 1 0 1;
+    padding: 0 1 0 3;
     color: #6b7a8d;
+    text-style: italic;
     height: auto;
     max-height: 3;
     overflow: hidden;

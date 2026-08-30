@@ -6,25 +6,27 @@ import re
 import sys
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import ClassVar, Literal, cast
 
+from rich.console import Console as RichConsole
+from rich.console import RenderableType
+from rich.markdown import Markdown as RichMarkdown
+from rich.syntax import Syntax as RichSyntax
+from rich.text import Text as RichText
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.timer import Timer
-from rich.console import Console as RichConsole
-from rich.markdown import Markdown as RichMarkdown
-from rich.syntax import Syntax as RichSyntax
-from rich.text import Text as RichText
-from textual.content import Content
 from textual.widget import Widget
-from textual.widgets import Collapsible, Footer, Label, OptionList, Static, TextArea
+from textual.widgets import Footer, Label, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 from textual.worker import Worker
 
@@ -342,9 +344,7 @@ class ApprovalScreen(ModalScreen[tuple[str, ApprovalDecision]]):
     def compose(self) -> ComposeResult:
         with Vertical(id="approval-dialog"):
             yield Static("Permission required", id="approval-title")
-            title = _tool_title(
-                ToolStarted(self.request.call_id, self.request.tool_name, self.request.arguments)
-            )
+            title = _tool_label(self.request.tool_name, self.request.arguments, finished=False)
             details = f"{title}\n\n{_tool_arguments(self.request.arguments)}"
             if self.request.guardian_note:
                 details += f"\n\n[Guardian] {self.request.guardian_note}"
@@ -394,28 +394,65 @@ _MODE_CYCLE: tuple[ApprovalMode, ...] = ("auto", "ask", "deny")
 
 
 class ThinkingCard(Vertical):
-    """A compact thinking panel. Click the title to expand/collapse."""
+    """Codex-style thinking panel: spinner while streaming, compact summary after.
+
+    Click the title to expand/collapse the full reasoning text.
+    """
+
+    FRAMES = CompactionProgress.FRAMES
 
     class Toggled(Message):
         def __init__(self, expanded: bool) -> None:
             self.expanded = expanded
             super().__init__()
 
-    def __init__(self, title: str, full_text: str = "", **kwargs: object) -> None:
-        extra = kwargs.pop("classes", "")
-        merged = f"thinking-card {extra}".strip()
-        super().__init__(classes=merged, **kwargs)
+    def __init__(
+        self, title: str = "Thinking", full_text: str = "", *, running: bool = False
+    ) -> None:
+        super().__init__(classes="thinking-card")
         self._title_text = title
         self._full_text = full_text
         self._expanded = False
-
-    def compose(self) -> ComposeResult:
-        yield Static(self._title_text, classes="thinking-title")
-        yield Static(
+        self._running = running
+        self._frame = 0
+        self._timer: Timer | None = None
+        self._title_widget = Static("", classes="thinking-title")
+        self._body_widget = Static(
             self._compact_text() or "Working…",
             markup=False,
             classes="thinking-body",
         )
+
+    def compose(self) -> ComposeResult:
+        self._title_widget.update(self._title_renderable())
+        yield self._title_widget
+        yield self._body_widget
+
+    def on_mount(self) -> None:
+        if self._running:
+            self._timer = self.set_interval(0.12, self._tick)
+
+    def on_unmount(self) -> None:
+        self._stop_timer()
+
+    def _stop_timer(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+
+    def _tick(self) -> None:
+        self._frame = (self._frame + 1) % len(self.FRAMES)
+        self._title_widget.update(self._title_renderable())
+
+    def _title_renderable(self) -> RichText:
+        text = RichText()
+        if self._running:
+            text.append(f"{self.FRAMES[self._frame]} ", style="#a78bfa")
+            text.append(self._title_text, style="#a78bfa")
+        else:
+            text.append("✻ ", style="#a78bfa")
+            text.append(self._title_text, style="#8b98ab")
+        return text
 
     def _compact_text(self) -> str:
         lines = self._full_text.splitlines()
@@ -423,24 +460,153 @@ class ThinkingCard(Vertical):
 
     def update_body(self, text: str) -> None:
         self._full_text = text
-        body = self.query_one(".thinking-body", Static)
-        body.update(self._full_text if self._expanded else self._compact_text() or "Working…")
+        self._body_widget.update(
+            self._full_text if self._expanded else self._compact_text() or "Working…"
+        )
 
-    def update_title(self, title: str) -> None:
-        self._title_text = title
-        self.query_one(".thinking-title", Static).update(title)
+    def finish(self, seconds: float | None = None) -> None:
+        """Settle the panel into its final past-tense state. Idempotent."""
+        if not self._running:
+            return
+        self._running = False
+        self._stop_timer()
+        if seconds is None:
+            self._title_text = "Thought"
+        elif seconds >= 1:
+            self._title_text = f"Thought for {int(seconds)}s"
+        else:
+            self._title_text = "Thought for a moment"
+        self._title_widget.update(self._title_renderable())
 
     async def on_click(self, event: events.Click) -> None:
         event.stop()
-        body = self.query_one(".thinking-body", Static)
+        if event.widget is not self._title_widget:
+            return
         if self._expanded:
             self._expanded = False
-            body.remove_class("expanded")
-            body.update(self._compact_text() or "(empty)")
+            self._body_widget.remove_class("expanded")
+            self._body_widget.update(self._compact_text() or "(empty)")
         else:
             self._expanded = True
-            body.add_class("expanded")
-            body.update(self._full_text or "(empty)")
+            self._body_widget.add_class("expanded")
+            self._body_widget.update(self._full_text or "(empty)")
+        self.post_message(self.Toggled(self._expanded))
+
+
+class ToolCard(Vertical):
+    """Codex-style tool card: a one-line status title with a click-to-expand body.
+
+    While running, the title shows an animated spinner and a present-tense
+    label ("Running make test"). On finish it switches to a ✓/✕ icon with a
+    past-tense label ("Ran make test"). The body stays empty until the tool
+    completes; clicking the title toggles its visibility.
+    """
+
+    FRAMES = CompactionProgress.FRAMES
+
+    class Toggled(Message):
+        def __init__(self, expanded: bool) -> None:
+            self.expanded = expanded
+            super().__init__()
+
+    def __init__(
+        self,
+        tool_name: str,
+        arguments: dict[str, object],
+        *,
+        expanded: bool = False,
+        final: tuple[str, bool] | None = None,
+    ) -> None:
+        status_class = "" if final is None else ("failed" if final[1] else "succeeded")
+        super().__init__(classes=f"tool-card {'running' if final is None else status_class}")
+        self._tool_name = tool_name
+        self._arguments = arguments
+        self._expanded = expanded
+        self._final = final
+        self._frame = 0
+        self._timer: Timer | None = None
+        self._title_widget = Static("", classes="tool-title")
+        self._body_wrap = Vertical(classes="tool-body-wrap")
+        self._body_wrap.display = expanded
+
+    @property
+    def tool_name(self) -> str:
+        return self._tool_name
+
+    @property
+    def arguments(self) -> dict[str, object]:
+        return self._arguments
+
+    @property
+    def pending(self) -> bool:
+        return self._final is None
+
+    def compose(self) -> ComposeResult:
+        self._title_widget.update(self._title_renderable())
+        yield self._title_widget
+        yield self._body_wrap
+
+    def on_mount(self) -> None:
+        if self._final is None:
+            self._timer = self.set_interval(0.12, self._tick)
+
+    def on_unmount(self) -> None:
+        self._stop_timer()
+
+    def _stop_timer(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+
+    def _tick(self) -> None:
+        self._frame = (self._frame + 1) % len(self.FRAMES)
+        self._title_widget.update(self._title_renderable())
+
+    def _title_renderable(self) -> RichText:
+        text = RichText()
+        if self._final is None:
+            text.append(f"{self.FRAMES[self._frame]} ", style="#fbbf24")
+            text.append(
+                _tool_label(self._tool_name, self._arguments, finished=False),
+                style="#d7dde5",
+            )
+            return text
+        status, is_error = self._final
+        icon, color = ("✕", "#fb7185") if is_error else ("✓", "#34d399")
+        label = _tool_label(self._tool_name, self._arguments, finished=True)
+        suffix = {"cancelled": " · cancelled", "timeout": " · timed out"}.get(status)
+        if suffix is not None:
+            label += suffix
+        elif status == "interrupted":
+            label += " · interrupted"
+        text.append(f"{icon} ", style=color)
+        text.append(label, style="#fb7185" if is_error else "#d7dde5")
+        return text
+
+    def finish(self, status: str, is_error: bool) -> None:
+        """Settle the card into its final state. Idempotent."""
+        if self._final is not None:
+            return
+        self._final = (status, is_error)
+        self._stop_timer()
+        self.remove_class("running")
+        self.add_class("failed" if is_error else "succeeded")
+        self._title_widget.update(self._title_renderable())
+
+    async def set_body(self, *widgets: Static) -> None:
+        await self._body_wrap.remove_children()
+        if widgets:
+            await self._body_wrap.mount(*widgets)
+        self._body_wrap.display = self._expanded and bool(widgets)
+
+    async def on_click(self, event: events.Click) -> None:
+        event.stop()
+        if event.widget is not self._title_widget:
+            return
+        if not self._body_wrap.children:
+            return
+        self._expanded = not self._expanded
+        self._body_wrap.display = self._expanded
         self.post_message(self.Toggled(self._expanded))
 
 
@@ -486,7 +652,8 @@ class CodingAgentTui(App[None]):
         self._assistant_text = ""
         self._thinking: ThinkingCard | None = None
         self._thinking_text = ""
-        self._tools: dict[str, tuple[Collapsible, Static, str, str, str, dict[str, object]]] = {}
+        self._thinking_started = 0.0
+        self._tools: dict[str, ToolCard] = {}
         self._completion_mode: Literal["commands", "models", "skills"] | None = None
         self._completion_matches: list[str] = []
         self._dismissed_completion_value: str | None = None
@@ -780,7 +947,7 @@ class CodingAgentTui(App[None]):
                     if self._assistant is None:
                         row = Horizontal(classes="assistant-row")
                         await self._mount(row)
-                        await row.mount(Static("·", markup=False, classes="bullet"))
+                        await row.mount(Static("⏺", markup=False, classes="bullet"))
                         self._assistant = Static(
                             "", markup=False, classes="message assistant-message"
                         )
@@ -791,7 +958,8 @@ class CodingAgentTui(App[None]):
                     self._follow_bottom_if(at_bottom)
                 elif isinstance(event, ThinkingStarted):
                     self._thinking_text = ""
-                    panel = ThinkingCard("Thinking · working")
+                    self._thinking_started = time.monotonic()
+                    panel = ThinkingCard(running=True)
                     self._thinking = panel
                     await self._mount(panel)
                 elif isinstance(event, ThinkingDelta):
@@ -802,7 +970,7 @@ class CodingAgentTui(App[None]):
                         self._follow_bottom_if(at_bottom)
                 elif isinstance(event, ThinkingFinished):
                     if self._thinking is not None:
-                        self._thinking.update_title("Thinking · complete")
+                        self._thinking.finish(time.monotonic() - self._thinking_started)
                 elif isinstance(event, ToolStarted):
                     await self._finish_assistant_segment()
                     await self._tool_started(event)
@@ -822,37 +990,36 @@ class CodingAgentTui(App[None]):
                     elif event.text:
                         await self._mount(_render_assistant_content(event.text))
         finally:
-            self.query_one("#composer", PromptTextArea).disabled = False
-            self.query_one("#composer", PromptTextArea).focus()
+            if self._thinking is not None:
+                self._thinking.finish(time.monotonic() - self._thinking_started)
+            for card in self._tools.values():
+                if card.pending:
+                    card.finish("interrupted", True)
+            with suppress(NoMatches):
+                composer = self.query_one("#composer", PromptTextArea)
+                composer.disabled = False
+                composer.focus()
 
     async def _tool_started(self, event: ToolStarted) -> None:
-        details = _tool_arguments(event.arguments)
-        body = Static(details, markup=False, classes="tool-body")
-        expand = event.tool_name in ("edit_file", "write_file")
-        panel = Collapsible(
-            body,
-            title=Content(f"· {_tool_title(event)} · running"),
-            collapsed=not expand,
-            classes="tool-card running",
+        card = ToolCard(
+            event.tool_name,
+            event.arguments,
+            expanded=event.tool_name in ("edit_file", "write_file"),
         )
-        self._tools[event.call_id] = (
-            panel, body, _tool_title(event), details, event.tool_name, event.arguments,
-        )
-        await self._mount(panel)
+        self._tools[event.call_id] = card
+        await self._mount(card)
 
     async def _tool_finished(self, event: ToolFinished) -> None:
-        item = self._tools.get(event.call_id)
-        if item is None:
+        card = self._tools.get(event.call_id)
+        if card is None:
             return
-        panel, body, title, details, tool_name, tool_args = item
         at_bottom = self._conversation_at_bottom()
-        panel.title = Content(f"· {'✓' if not event.is_error else '✕'} {title} · {event.status}")
-        panel.remove_class("running")
-        panel.add_class("failed" if event.is_error else "succeeded")
-        new_widgets = _render_tool_body(tool_name, tool_args, event.content)
-        await body.remove()
-        contents = panel.query_one("Contents")
-        await contents.mount(*new_widgets)
+        card.finish(event.status, event.is_error)
+        await card.set_body(
+            *_render_tool_body(
+                card.tool_name, card.arguments, event.content, is_error=event.is_error
+            )
+        )
         self._follow_bottom_if(at_bottom)
 
     async def _command(self, prompt: str) -> None:
@@ -1135,11 +1302,14 @@ class CodingAgentTui(App[None]):
 
     async def _finish_assistant_segment(self) -> None:
         """Replace streaming plain-text with rendered Markdown when it contains formatting."""
-        if self._assistant is not None and self._assistant_text:
-            if _has_markdown_formatting(self._assistant_text):
-                at_bottom = self._conversation_at_bottom()
-                self._assistant.update(RichMarkdown(self._assistant_text))
-                self._follow_bottom_if(at_bottom)
+        if (
+            self._assistant is not None
+            and self._assistant_text
+            and _has_markdown_formatting(self._assistant_text)
+        ):
+            at_bottom = self._conversation_at_bottom()
+            self._assistant.update(RichMarkdown(self._assistant_text))
+            self._follow_bottom_if(at_bottom)
         self._assistant = None
         self._assistant_text = ""
 
@@ -1196,10 +1366,10 @@ class CodingAgentTui(App[None]):
             if isinstance(block, TextBlock) and block.text:
                 await self._mount(_render_assistant_content(block.text))
             elif isinstance(block, ThinkingBlock):
-                card = ThinkingCard("Thinking · recovered", block.thinking or "(empty)")
+                card = ThinkingCard("Thought", block.thinking or "(empty)")
                 await self._mount(card)
             elif isinstance(block, RedactedThinkingBlock):
-                card = ThinkingCard("Thinking · redacted", "Provider-redacted thinking")
+                card = ThinkingCard("Thought · redacted", "Provider-redacted thinking")
                 await self._mount(card)
             elif isinstance(block, ToolUseBlock):
                 await self._render_recovered_tool(block, result_by_id.get(block.call_id))
@@ -1215,23 +1385,21 @@ class CodingAgentTui(App[None]):
     async def _render_recovered_tool(
         self, call: ToolUseBlock, result: ToolResultBlock | None
     ) -> None:
-        started = ToolStarted(call.call_id, call.name, call.input)
-        title = _tool_title(started)
         content = "interrupted before result" if result is None else result.content
-        body_widgets = _render_tool_body(call.name, call.input, content)
         failed = result is None or result.is_error
         status = "interrupted" if result is None else ("error" if result.is_error else "done")
-        expand = call.name in ("edit_file", "write_file")
-        panel = Collapsible(
-            *body_widgets,
-            title=Content(f"· {'✕' if failed else '✓'} {title} · {status}"),
-            collapsed=not expand,
-            classes="tool-card failed" if failed else "tool-card succeeded",
+        card = ToolCard(
+            call.name,
+            call.input,
+            expanded=call.name in ("edit_file", "write_file"),
+            final=(status, failed),
         )
-        await self._mount(panel)
+        await self._mount(card)
+        await card.set_body(*_render_tool_body(call.name, call.input, content, is_error=failed))
 
     @on(ThinkingCard.Toggled)
-    def _on_thinking_toggled(self, message: ThinkingCard.Toggled) -> None:
+    @on(ToolCard.Toggled)
+    def _on_panel_toggled(self, message: ThinkingCard.Toggled | ToolCard.Toggled) -> None:
         if message.expanded:
             self._stick_to_bottom = False
 
@@ -1325,7 +1493,7 @@ def _has_markdown_formatting(text: str) -> bool:
 
 
 def _render_assistant_content(text: str) -> Horizontal:
-    bullet = Static("·", markup=False, classes="bullet")
+    bullet = Static("⏺", markup=False, classes="bullet")
     if _has_markdown_formatting(text):
         content = Static(RichMarkdown(text), classes="message assistant-message")
     else:
@@ -1334,85 +1502,81 @@ def _render_assistant_content(text: str) -> Horizontal:
 
 
 def _render_tool_body(
-    tool_name: str, arguments: dict[str, object], result: str
+    tool_name: str, arguments: dict[str, object], result: str, *, is_error: bool = False
 ) -> tuple[Static, ...]:
     """Return one or more Static widgets for the tool body."""
-    args_text = _tool_arguments(arguments)
     result_text = _preview_text(result or "(no output)", 12_000)
+    if is_error:
+        return (Static(result_text, markup=False, classes="tool-body error-output"),)
     if tool_name == "shell":
-        command = arguments.get("command")
         text = RichText()
-        if isinstance(command, str):
-            text.append("Command:\n", style="bold")
-            text.append_text(_renderable_to_text(RichSyntax(
-                command, "bash", theme="dracula", padding=(0, 1),
-            )))
-            text.append("\n")
-        text.append("Output:\n", style="bold")
+        command = arguments.get("command")
+        if isinstance(command, str) and command.strip():
+            text.append("$ ", style="bold #7dd3fc")
+            text.append_text(
+                _renderable_to_text(RichSyntax(command, "bash", theme="github-dark", padding=0))
+            )
+            text.append("\n\n")
         text.append(result_text)
         return (Static(text, classes="tool-body"),)
     if tool_name == "edit_file":
-        return _render_edit_diff(arguments, result_text)
+        return _render_edit_diff(arguments)
     if tool_name == "write_file":
-        return _render_write_summary(arguments, result_text)
-    return (Static(f"{args_text}\n\nResult:\n{result_text}", markup=False, classes="tool-body"),)
+        return _render_write_summary(arguments)
+    if tool_name in ("read_file", "code_search", "mkdir", "activate_skill", "read_skill_resource"):
+        return (Static(result_text, markup=False, classes="tool-body"),)
+    args_text = _tool_arguments(arguments)
+    return (Static(f"{args_text}\n\n{result_text}", markup=False, classes="tool-body"),)
 
 
-def _render_edit_diff(arguments: dict[str, object], result_text: str) -> object:
-    """Render edit_file as a Codex-style inline diff."""
+def _render_edit_diff(arguments: dict[str, object]) -> tuple[Static, ...]:
+    """Render edit_file as a +/- gutter diff with syntax highlighting."""
     path = arguments.get("path", "?")
-    start_line = arguments.get("start_line", 1)
     expected = arguments.get("expected_content", "")
     replacement = arguments.get("replacement", "")
-    if not isinstance(start_line, int):
-        start_line = 1
     if not isinstance(expected, str) or not isinstance(replacement, str):
-        return result_text
+        return (Static("(edit preview unavailable)", markup=False, classes="tool-body"),)
 
-    old_lines = expected.splitlines()
-    new_lines = replacement.splitlines()
-    added = len(new_lines)
-    removed = len(old_lines)
-    lang = _lang_from_path(path)
-
+    lang = _lang_from_path(str(path))
     widgets: list[Static] = []
-    header = RichText(f"Edited {path} (+{added} -{removed})", style="bold")
-    widgets.append(Static(header, classes="diff-header"))
-    if old_lines:
-        rendered = _renderable_to_text(RichSyntax(
-            expected, lang, theme="dracula", line_numbers=True, start_line=start_line,
-        ))
-        widgets.append(Static(rendered, classes="diff-removed"))
-    if new_lines:
-        rendered = _renderable_to_text(RichSyntax(
-            replacement, lang, theme="dracula", line_numbers=True, start_line=start_line,
-        ))
-        widgets.append(Static(rendered, classes="diff-added"))
+    if expected:
+        widgets.append(Static(_diff_lines(expected, lang, "-", "#f47067"), classes="diff-removed"))
+    if replacement:
+        widgets.append(Static(_diff_lines(replacement, lang, "+", "#57ab5a"), classes="diff-added"))
     return tuple(widgets)
 
 
-def _render_write_summary(arguments: dict[str, object], result_text: str) -> tuple[Static, ...]:
-    """Render write_file with syntax-highlighted content on green background."""
+def _render_write_summary(arguments: dict[str, object]) -> tuple[Static, ...]:
+    """Render write_file as an all-added block with an overflow note."""
     path = arguments.get("path", "?")
     content = arguments.get("content", "")
-    if not isinstance(path, str) or not isinstance(content, str):
-        return (Static(result_text, markup=False, classes="tool-body"),)
+    if not isinstance(content, str):
+        return (Static("(content preview unavailable)", markup=False, classes="tool-body"),)
 
     lines = content.splitlines()
-    added = len(lines)
     preview = "\n".join(lines[:80])
+    lang = _lang_from_path(str(path))
+    widgets = [Static(_diff_lines(preview, lang, "+", "#57ab5a"), classes="diff-added")]
     if len(lines) > 80:
-        preview += f"\n# ... +{len(lines) - 80} more lines"
-    lang = _lang_from_path(path)
+        widgets.append(
+            Static(f"… +{len(lines) - 80} more lines", markup=False, classes="diff-more")
+        )
+    return tuple(widgets)
 
-    header = RichText(f"Created {path} (+{added} lines)", style="bold")
-    rendered = _renderable_to_text(RichSyntax(
-        preview, lang, theme="dracula", line_numbers=True,
-    ))
-    return (
-        Static(header, classes="diff-header"),
-        Static(rendered, classes="diff-added"),
-    )
+
+def _diff_lines(code: str, lang: str, marker: str, marker_style: str) -> RichText:
+    """Prefix each syntax-highlighted line with a +/- gutter marker."""
+    rendered = _renderable_to_text(RichSyntax(code, lang, theme="github-dark"))
+    lines = rendered.split("\n")
+    if lines and not lines[-1].plain:
+        lines.pop()
+    out = RichText()
+    for index, line in enumerate(lines):
+        out.append(f"{marker} ", style=f"bold {marker_style}")
+        out.append_text(line)
+        if index < len(lines) - 1:
+            out.append("\n")
+    return out
 
 
 _LANG_MAP = {
@@ -1432,7 +1596,7 @@ def _lang_from_path(path: str) -> str:
     return _LANG_MAP.get(ext, ext or "text")
 
 
-def _renderable_to_text(renderable: object) -> RichText:
+def _renderable_to_text(renderable: RenderableType) -> RichText:
     """Pre-render a Rich renderable to a Text object (preserves styles, enables selection).
 
     Strips trailing whitespace per line so Textual can wrap long lines
@@ -1454,34 +1618,61 @@ def _renderable_to_text(renderable: object) -> RichText:
     return result
 
 
-def _tool_title(event: ToolStarted) -> str:
-    if event.tool_name == "shell":
-        return "local bash"
-    path = event.arguments.get("path")
+def _tool_label(tool_name: str, arguments: dict[str, object], *, finished: bool) -> str:
+    """Codex-style one-line tool label, tensed by execution state."""
+    if tool_name == "shell":
+        command = arguments.get("command")
+        command_text = _truncate(command, 72) if isinstance(command, str) else ""
+        verb = "Ran" if finished else "Running"
+        return f"{verb} {command_text}".rstrip()
+    path = arguments.get("path")
     if isinstance(path, str):
-        if event.tool_name == "edit_file":
-            start = event.arguments.get("start_line")
-            end = event.arguments.get("end_line")
-            return f"edit_file · {path}:{start}-{end}"
-        if event.tool_name == "read_file":
-            start = event.arguments.get("start_line", 1)
-            end = event.arguments.get("end_line")
-            suffix = f":{start}-{end}" if end is not None else f":{start}-end"
-            return f"read_file · {path}{suffix}"
-        return f"{event.tool_name} · {path}"
-    if event.tool_name == "code_search":
-        query = event.arguments.get("query")
+        if tool_name == "read_file":
+            start = arguments.get("start_line", 1)
+            end = arguments.get("end_line")
+            if end is not None:
+                path = f"{path}:{start}-{end}"
+            elif start != 1:
+                path = f"{path}:{start}-end"
+            return f"{'Read' if finished else 'Reading'} {path}"
+        if tool_name == "edit_file":
+            start = arguments.get("start_line", "?")
+            end = arguments.get("end_line", "?")
+            label = f"{'Edited' if finished else 'Editing'} {path}:{start}-{end}"
+            if finished:
+                expected = arguments.get("expected_content")
+                replacement = arguments.get("replacement")
+                if isinstance(expected, str) and isinstance(replacement, str):
+                    added = len(replacement.splitlines())
+                    removed = len(expected.splitlines())
+                    label += f" (+{added} -{removed})"
+            return label
+        if tool_name == "write_file":
+            if finished:
+                content = arguments.get("content")
+                if isinstance(content, str):
+                    return f"Wrote {path} (+{len(content.splitlines())})"
+                return f"Wrote {path}"
+            return f"Writing {path}"
+        if tool_name == "mkdir":
+            return f"{'Created' if finished else 'Creating'} directory {path}"
+        return f"{tool_name} {path}"
+    if tool_name == "code_search":
+        query = arguments.get("query")
         if isinstance(query, str):
-            return f"code_search · {_preview_text(query, 80)}"
-    return event.tool_name
+            verb = "Searched" if finished else "Searching"
+            return f'{verb} "{_truncate(query, 48)}"'
+    return tool_name
+
+
+def _truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 1]}…"
 
 
 def _tool_arguments(arguments: dict[str, object]) -> str:
     return "Input:\n" + json.dumps(_preview_value(arguments), ensure_ascii=False, indent=2)
-
-
-def _tool_body(arguments: str, result: str) -> str:
-    return f"{arguments}\n\nResult:\n{_preview_text(result or '(no output)', 12_000)}"
 
 
 def _preview_value(value: object) -> object:

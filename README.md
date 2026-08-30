@@ -109,7 +109,6 @@ uv run coding-agent --approval-mode auto            # 跳过手动审批
 | `Enter` | 提交输入 |
 | `Shift+Enter` | 在输入框内换行 |
 | `Shift+Tab` | 循环切换审批模式（auto → ask → deny） |
-| `Ctrl+T` | 切换思考面板的显示/隐藏 |
 | `Ctrl+C` | 取消当前运行的任务；空闲时则复制已选中的文本 |
 | `Ctrl+Q` | 退出 |
 
@@ -124,7 +123,6 @@ uv run coding-agent --approval-mode auto            # 跳过手动审批
 | `/skill <name> <task>` | 用指定 skill 执行一个任务 |
 | `/context` | 查看上下文占用情况 |
 | `/compact` | 手动压缩对话上下文 |
-| `/thinking` | 切换思考细节的显示 |
 | `/resume` | 恢复一个已保存的会话 |
 | `/clear` | 开始一个全新的空会话 |
 | `/exit` | 退出 codingAgent |
