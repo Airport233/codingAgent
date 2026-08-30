@@ -1344,15 +1344,26 @@ def _lang_from_path(path: str) -> str:
     return _LANG_MAP.get(ext, ext or "text")
 
 
-def _renderable_to_text(renderable: object, width: int = 200) -> RichText:
-    """Pre-render a Rich renderable to a Text object (preserves styles, enables selection)."""
-    console = RichConsole(width=width, highlight=False, force_terminal=True)
-    text = RichText()
+def _renderable_to_text(renderable: object) -> RichText:
+    """Pre-render a Rich renderable to a Text object (preserves styles, enables selection).
+
+    Strips trailing whitespace per line so Textual can wrap long lines
+    when the terminal is narrower than the original render width.
+    """
+    console = RichConsole(width=500, highlight=False, force_terminal=True)
+    raw = RichText()
     for segment in console.render(renderable):
         if segment.control:
             continue
-        text.append(segment.text, style=segment.style)
-    return text
+        raw.append(segment.text, style=segment.style)
+    lines = raw.split("\n")
+    result = RichText()
+    for i, line in enumerate(lines):
+        line.rstrip()
+        result.append_text(line)
+        if i < len(lines) - 1:
+            result.append("\n")
+    return result
 
 
 def _tool_title(event: ToolStarted) -> str:
