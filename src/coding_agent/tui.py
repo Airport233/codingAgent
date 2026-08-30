@@ -713,6 +713,7 @@ class CodingAgentTui(App[None]):
                     self._assistant.update(self._assistant_text)
                     self._follow_bottom_if(at_bottom)
                 elif isinstance(event, ThinkingStarted):
+                    self._thinking_text = ""
                     body = Static("Working…", markup=False, classes="thinking-body")
                     panel = Collapsible(
                         body,

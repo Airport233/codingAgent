@@ -956,7 +956,76 @@ async def test_thinking_panel_auto_expands_while_streaming_and_collapses_when_do
         assert thinking.title == "Thinking · complete"
 
 
-async def test_streaming_text_follows_the_bottom_unless_the_user_scrolled_away() -> None:
+async def test_second_thinking_panel_does_not_replay_the_first_ones_text() -> None:
+    """Two thinking segments in one turn must each show only their own text."""
+
+    class TwoStepThinkingProvider:
+        def __init__(self) -> None:
+            self.step = 0
+
+        async def stream(
+            self,
+            conversation: tuple[ConversationExchange, ...],
+            tools: tuple[ToolSpec, ...],
+            system_instructions: str | None = None,
+        ) -> AsyncIterator[ProviderEvent]:
+            del conversation, tools, system_instructions
+            self.step += 1
+            if self.step == 1:
+                yield ProviderThinkingDelta(thinking="first reasoning")
+                yield ProviderResponseFinished(
+                    AssistantExchange(
+                        (
+                            ThinkingBlock("first reasoning"),
+                            ToolUseBlock("call-1", "noop", {}),
+                        ),
+                        "tool_use",
+                    )
+                )
+            else:
+                yield ProviderThinkingDelta(thinking="second reasoning")
+                yield ProviderResponseFinished(
+                    AssistantExchange(
+                        (ThinkingBlock("second reasoning"), TextBlock("done")),
+                        "end_turn",
+                    )
+                )
+
+    class NoopTool:
+        name = "noop"
+        description = "Does nothing"
+
+        class input_model(BaseModel):
+            pass
+
+        async def execute(self, arguments: BaseModel) -> ToolOutput:
+            return ToolOutput("ok")
+
+    provider = TwoStepThinkingProvider()
+    app = CodingAgentTui(
+        AgentApplication(
+            provider,
+            ToolDispatcher(ToolCatalog({"noop": NoopTool()})),
+            InMemorySessionStore(),
+        ),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        app.query_one("#composer").value = "Do two steps"
+        await pilot.press("enter")
+        for _ in range(8):
+            await pilot.pause()
+
+        cards = app.query(".thinking-card")
+        assert len(cards) == 2
+        first_text = _widget_text(cards[0].query_one(".thinking-body"))
+        second_text = _widget_text(cards[1].query_one(".thinking-body"))
+        assert "first reasoning" in first_text
+        assert "first reasoning" not in second_text
+        assert "second reasoning" in second_text
     class StreamingTextProvider:
         def __init__(self) -> None:
             self.release = asyncio.Event()
