@@ -444,6 +444,7 @@ class CodingAgentTui(App[None]):
         self._prompt_history: list[str] = []
         self._history_index: int | None = None
         self._last_history_text: str | None = None
+        self._stick_to_bottom: bool = True
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="conversation"):
@@ -468,10 +469,27 @@ class CodingAgentTui(App[None]):
 
     async def on_mount(self) -> None:
         self.query_one("#completion-popup", Vertical).display = False
+        conversation = self.query_one("#conversation", VerticalScroll)
+        # virtual_size changes AFTER the layout pass, so watching it lets us
+        # scroll with the correct virtual size (unlike calling scroll_end
+        # right after mount/update, which sees a stale size).
+        self.watch(conversation, "virtual_size", self._maybe_stick_to_bottom)
+        self.watch(conversation, "scroll_y", self._track_scroll_position)
         await self._render_recovered_history()
         self._refresh_session_metadata()
         self._update_mode_indicator()
         self.query_one("#composer", PromptTextArea).focus()
+
+    def _maybe_stick_to_bottom(self) -> None:
+        if self._stick_to_bottom:
+            self.query_one("#conversation", VerticalScroll).scroll_end(
+                animate=False, immediate=True
+            )
+
+    def _track_scroll_position(self) -> None:
+        self._stick_to_bottom = self.query_one(
+            "#conversation", VerticalScroll
+        ).is_vertical_scroll_end
 
     @on(PromptTextArea.Submitted, "#composer")
     async def submit_prompt(self, event: PromptTextArea.Submitted) -> None:
@@ -1008,11 +1026,8 @@ class CodingAgentTui(App[None]):
         was_at_bottom = conversation.is_vertical_scroll_end
         await conversation.mount(widget)
         if force_scroll or was_at_bottom:
-            # Defer scroll_end until after the layout pass recomputes the
-            # virtual size, otherwise it lands one widget short.
-            conversation.call_after_refresh(
-                lambda: conversation.scroll_end(animate=False, immediate=True)
-            )
+            self._stick_to_bottom = True
+            conversation.scroll_end(animate=False, immediate=True)
 
     def _conversation_at_bottom(self) -> bool:
         return self.query_one("#conversation", VerticalScroll).is_vertical_scroll_end
@@ -1021,8 +1036,10 @@ class CodingAgentTui(App[None]):
         """Re-stick the view to the bottom after in-place content growth,
         but only if the user hadn't scrolled away before the update."""
         if was_at_bottom:
-            conversation = self.query_one("#conversation", VerticalScroll)
-            conversation.scroll_end(animate=False, immediate=True)
+            self._stick_to_bottom = True
+            self.query_one("#conversation", VerticalScroll).scroll_end(
+                animate=False, immediate=True
+            )
 
     async def _mount_welcome(self) -> None:
         await self._mount(Static(self._welcome_text(), markup=False, id="brand"))
