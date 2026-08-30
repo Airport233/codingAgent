@@ -18,7 +18,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.timer import Timer
-from rich.console import Group as RichGroup
+from rich.console import Console as RichConsole
 from rich.markdown import Markdown as RichMarkdown
 from rich.syntax import Syntax as RichSyntax
 from rich.text import Text as RichText
@@ -1258,7 +1258,9 @@ def _render_tool_body(
         text = RichText()
         if isinstance(command, str):
             text.append("Command:\n", style="bold")
-            text.append(f"  {command}\n", style="#93c5fd")
+            text.append_text(_renderable_to_text(RichSyntax(
+                command, "bash", theme="dracula", background_color="#0a0e13", padding=(0, 1),
+            )))
             text.append("\n")
         text.append("Output:\n", style="bold")
         text.append(result_text)
@@ -1287,19 +1289,19 @@ def _render_edit_diff(arguments: dict[str, object], result_text: str) -> object:
     removed = len(old_lines)
     lang = _lang_from_path(path)
 
-    parts: list[object] = []
-    parts.append(RichText(f"Edited {path} (+{added} -{removed})\n", style="bold"))
+    result = RichText()
+    result.append(f"Edited {path} (+{added} -{removed})\n", style="bold")
     if old_lines:
-        parts.append(RichSyntax(
+        result.append_text(_renderable_to_text(RichSyntax(
             expected, lang, theme="dracula", background_color="#2d1214",
             line_numbers=True, start_line=start_line,
-        ))
+        )))
     if new_lines:
-        parts.append(RichSyntax(
+        result.append_text(_renderable_to_text(RichSyntax(
             replacement, lang, theme="dracula", background_color="#122d14",
             line_numbers=True, start_line=start_line,
-        ))
-    return RichGroup(*parts)
+        )))
+    return result
 
 
 def _render_write_summary(arguments: dict[str, object], result_text: str) -> object:
@@ -1316,13 +1318,13 @@ def _render_write_summary(arguments: dict[str, object], result_text: str) -> obj
         preview += f"\n# ... +{len(lines) - 80} more lines"
     lang = _lang_from_path(path)
 
-    parts: list[object] = []
-    parts.append(RichText(f"Created {path} (+{added} lines)\n", style="bold"))
-    parts.append(RichSyntax(
+    result = RichText()
+    result.append(f"Created {path} (+{added} lines)\n", style="bold")
+    result.append_text(_renderable_to_text(RichSyntax(
         preview, lang, theme="dracula", background_color="#122d14",
         line_numbers=True,
-    ))
-    return RichGroup(*parts)
+    )))
+    return result
 
 
 _LANG_MAP = {
@@ -1340,6 +1342,17 @@ _LANG_MAP = {
 def _lang_from_path(path: str) -> str:
     ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
     return _LANG_MAP.get(ext, ext or "text")
+
+
+def _renderable_to_text(renderable: object, width: int = 200) -> RichText:
+    """Pre-render a Rich renderable to a Text object (preserves styles, enables selection)."""
+    console = RichConsole(width=width, highlight=False, force_terminal=True)
+    text = RichText()
+    for segment in console.render(renderable):
+        if segment.control:
+            continue
+        text.append(segment.text, style=segment.style)
+    return text
 
 
 def _tool_title(event: ToolStarted) -> str:

@@ -47,19 +47,18 @@ pytestmark = pytest.mark.asyncio
 
 def _widget_text(widget: object) -> str:
     """Extract text from a Static, handling both plain strings and Rich renderables."""
-    from io import StringIO
-    from rich.console import Console
+    from rich.text import Text
 
     content = getattr(widget, "_Static__content", None)
     if content is None:
         return str(widget)
     if isinstance(content, str):
         return content
+    if isinstance(content, Text):
+        return content.plain
     if hasattr(content, "markup"):
         return content.markup
-    buf = StringIO()
-    Console(file=buf, force_terminal=False, width=200, highlight=False).print(content, end="")
-    return buf.getvalue()
+    return str(content)
 
 
 async def test_slash_help_uses_one_aligned_command_per_line() -> None:
