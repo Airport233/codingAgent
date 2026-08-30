@@ -76,7 +76,6 @@ async def test_slash_help_uses_one_aligned_command_per_line() -> None:
         "  /skill <name> <task>     Run a task with a coding workflow",
         "  /context                 Show context usage",
         "  /compact                 Compact conversation context",
-        "  /thinking                Toggle thinking details",
         "  /resume                  Resume a saved session",
         "  /clear                   Start a new empty session",
         "  /exit                    Exit codingAgent",
@@ -591,7 +590,6 @@ async def test_slash_popup_allocates_visible_rows_for_every_command_match() -> N
             ("/m", ("/model", "/mode")),
             ("/r", ("/resume",)),
             ("/h", ("/help",)),
-            ("/t", ("/thinking",)),
         ):
             composer.value = prefix
             await pilot.pause()
@@ -1370,8 +1368,6 @@ async def test_tui_slash_commands_update_state_without_leaving_full_screen() -> 
         for command in (
             "/help",
             "/model",
-            "/thinking",
-            "/thinking",
             "/context",
             "/compact",
             "/unknown",

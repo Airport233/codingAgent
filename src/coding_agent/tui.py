@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import ClassVar, Literal, cast
 
-from textual import on
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -91,7 +91,6 @@ SLASH_COMMANDS = (
     SlashCommand("skill", "Run a task with a coding workflow", "<name> <task>"),
     SlashCommand("context", "Show context usage"),
     SlashCommand("compact", "Compact conversation context"),
-    SlashCommand("thinking", "Toggle thinking details"),
     SlashCommand("resume", "Resume a saved session"),
     SlashCommand("clear", "Start a new empty session"),
     SlashCommand("exit", "Exit codingAgent"),
@@ -393,6 +392,57 @@ class ApprovalScreen(ModalScreen[tuple[str, ApprovalDecision]]):
 _MODE_CYCLE: tuple[ApprovalMode, ...] = ("auto", "ask", "deny")
 
 
+class ThinkingCard(Vertical):
+    """A compact thinking panel. Click the title to expand/collapse."""
+
+    class Toggled(Message):
+        def __init__(self, expanded: bool) -> None:
+            self.expanded = expanded
+            super().__init__()
+
+    def __init__(self, title: str, full_text: str = "", **kwargs: object) -> None:
+        extra = kwargs.pop("classes", "")
+        merged = f"thinking-card {extra}".strip()
+        super().__init__(classes=merged, **kwargs)
+        self._title_text = title
+        self._full_text = full_text
+        self._expanded = False
+
+    def compose(self) -> ComposeResult:
+        yield Static(self._title_text, classes="thinking-title")
+        yield Static(
+            self._compact_text() or "Working…",
+            markup=False,
+            classes="thinking-body",
+        )
+
+    def _compact_text(self) -> str:
+        lines = self._full_text.splitlines()
+        return "\n".join(lines[-3:]) if len(lines) > 3 else self._full_text
+
+    def update_body(self, text: str) -> None:
+        self._full_text = text
+        body = self.query_one(".thinking-body", Static)
+        body.update(self._full_text if self._expanded else self._compact_text() or "Working…")
+
+    def update_title(self, title: str) -> None:
+        self._title_text = title
+        self.query_one(".thinking-title", Static).update(title)
+
+    async def on_click(self, event: events.Click) -> None:
+        event.stop()
+        body = self.query_one(".thinking-body", Static)
+        if self._expanded:
+            self._expanded = False
+            body.remove_class("expanded")
+            body.update(self._compact_text() or "(empty)")
+        else:
+            self._expanded = True
+            body.add_class("expanded")
+            body.update(self._full_text or "(empty)")
+        self.post_message(self.Toggled(self._expanded))
+
+
 class CodingAgentTui(App[None]):
     CSS_PATH = "tui.tcss"
     TITLE = "codingAgent"
@@ -400,7 +450,6 @@ class CodingAgentTui(App[None]):
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("ctrl+c,super+c", "cancel_turn", "Cancel / copy", show=True, priority=True),
         Binding("ctrl+q", "quit_agent", "Quit", show=True),
-        Binding("ctrl+t", "toggle_thinking", "Thinking", show=True),
         Binding("shift+tab", "cycle_approval_mode", "Mode", show=True, priority=True),
     ]
 
@@ -431,11 +480,10 @@ class CodingAgentTui(App[None]):
         self.clear_session = clear_session
         self.list_sessions = list_sessions
         self.resume_session = resume_session
-        self.thinking_visible = False
         self._turn_worker: Worker[None] | None = None
         self._assistant: Static | None = None
         self._assistant_text = ""
-        self._thinking: tuple[Vertical, Static] | None = None
+        self._thinking: ThinkingCard | None = None
         self._thinking_text = ""
         self._tools: dict[str, tuple[Collapsible, Static, str, str, str, dict[str, object]]] = {}
         self._completion_mode: Literal["commands", "models", "skills"] | None = None
@@ -739,25 +787,18 @@ class CodingAgentTui(App[None]):
                     self._follow_bottom_if(at_bottom)
                 elif isinstance(event, ThinkingStarted):
                     self._thinking_text = ""
-                    body = Static("Working…", markup=False, classes="thinking-body")
-                    panel = Vertical(
-                        Static("Thinking · working", classes="thinking-title"),
-                        body,
-                        classes="thinking-card",
-                    )
-                    self._thinking = (panel, body)
+                    panel = ThinkingCard("Thinking · working")
+                    self._thinking = panel
                     await self._mount(panel)
                 elif isinstance(event, ThinkingDelta):
                     at_bottom = self._conversation_at_bottom()
                     self._thinking_text += event.text
                     if self._thinking is not None:
-                        self._thinking[1].update(self._thinking_display_text())
+                        self._thinking.update_body(self._thinking_text)
                         self._follow_bottom_if(at_bottom)
                 elif isinstance(event, ThinkingFinished):
                     if self._thinking is not None:
-                        self._thinking[0].query_one(".thinking-title", Static).update(
-                            "Thinking · complete"
-                        )
+                        self._thinking.update_title("Thinking · complete")
                 elif isinstance(event, ToolStarted):
                     await self._finish_assistant_segment()
                     await self._tool_started(event)
@@ -912,8 +953,6 @@ class CodingAgentTui(App[None]):
                 ResumeSessionScreen(sessions, current_session_id=self.session_id),
                 self._resume_selected,
             )
-        elif prompt == "/thinking":
-            await self.action_toggle_thinking()
         elif prompt == "/context":
             status = self.application.context_status()
             if status is None:
@@ -1153,29 +1192,11 @@ class CodingAgentTui(App[None]):
             if isinstance(block, TextBlock) and block.text:
                 await self._mount(_render_assistant_content(block.text))
             elif isinstance(block, ThinkingBlock):
-                body = Static(
-                    block.thinking or "(empty)", markup=False, classes="thinking-body"
-                )
-                await self._mount(
-                    Vertical(
-                        Static("Thinking · recovered", classes="thinking-title"),
-                        body,
-                        classes="thinking-card",
-                    )
-                )
+                card = ThinkingCard("Thinking · recovered", block.thinking or "(empty)")
+                await self._mount(card)
             elif isinstance(block, RedactedThinkingBlock):
-                body = Static(
-                    "Provider-redacted thinking",
-                    markup=False,
-                    classes="thinking-body",
-                )
-                await self._mount(
-                    Vertical(
-                        Static("Thinking · redacted", classes="thinking-title"),
-                        body,
-                        classes="thinking-card",
-                    )
-                )
+                card = ThinkingCard("Thinking · redacted", "Provider-redacted thinking")
+                await self._mount(card)
             elif isinstance(block, ToolUseBlock):
                 await self._render_recovered_tool(block, result_by_id.get(block.call_id))
             elif isinstance(block, UnknownProviderBlock):
@@ -1205,30 +1226,10 @@ class CodingAgentTui(App[None]):
         )
         await self._mount(panel)
 
-    def _thinking_display_text(self) -> str:
-        """Return the text to show in the thinking body: last 3 lines in
-        compact mode, full text when expanded."""
-        if not self._thinking_text:
-            return "Working…"
-        if self.thinking_visible:
-            return self._thinking_text
-        lines = self._thinking_text.splitlines()
-        return "\n".join(lines[-3:]) if len(lines) > 3 else self._thinking_text
-
-    async def action_toggle_thinking(self) -> None:
-        self.thinking_visible = not self.thinking_visible
-        if self._thinking is not None:
-            body = self._thinking[1]
-            if self.thinking_visible:
-                body.add_class("expanded")
-                body.update(self._thinking_text or "Working…")
-                # Don't yank the view when the user expands to read.
-                self._stick_to_bottom = False
-            else:
-                body.remove_class("expanded")
-                body.update(self._thinking_display_text())
-        state = "shown" if self.thinking_visible else "hidden"
-        await self._notice(f"Thinking details: {state}.", "info")
+    @on(ThinkingCard.Toggled)
+    def _on_thinking_toggled(self, message: ThinkingCard.Toggled) -> None:
+        if message.expanded:
+            self._stick_to_bottom = False
 
     async def action_cycle_approval_mode(self) -> None:
         current = self.application.approval_mode()
