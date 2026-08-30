@@ -1001,12 +1001,18 @@ class CodingAgentTui(App[None]):
         self._last_history_text = None
         await self._render_recovered_history()
 
-    async def _mount(self, widget: Static | Collapsible, *, force_scroll: bool = False) -> None:
+    async def _mount(
+        self, widget: Static | Collapsible, *, force_scroll: bool = False
+    ) -> None:
         conversation = self.query_one("#conversation", VerticalScroll)
         was_at_bottom = conversation.is_vertical_scroll_end
         await conversation.mount(widget)
         if force_scroll or was_at_bottom:
-            conversation.scroll_end(animate=False)
+            # Defer scroll_end until after the layout pass recomputes the
+            # virtual size, otherwise it lands one widget short.
+            conversation.call_after_refresh(
+                lambda: conversation.scroll_end(animate=False, immediate=True)
+            )
 
     def _conversation_at_bottom(self) -> bool:
         return self.query_one("#conversation", VerticalScroll).is_vertical_scroll_end
@@ -1015,7 +1021,8 @@ class CodingAgentTui(App[None]):
         """Re-stick the view to the bottom after in-place content growth,
         but only if the user hadn't scrolled away before the update."""
         if was_at_bottom:
-            self.query_one("#conversation", VerticalScroll).scroll_end(animate=False)
+            conversation = self.query_one("#conversation", VerticalScroll)
+            conversation.scroll_end(animate=False, immediate=True)
 
     async def _mount_welcome(self) -> None:
         await self._mount(Static(self._welcome_text(), markup=False, id="brand"))
