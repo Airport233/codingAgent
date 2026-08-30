@@ -158,3 +158,44 @@ def test_install_runs_npx_from_the_project_root(
     asyncio.run(installer.install("owner/repo"))
 
     assert Path(str(captured["cwd"])) == tmp_path
+
+
+def test_install_executes_the_npx_path_found_on_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows exposes npx as npx.cmd, which cannot be relaunched as bare npx."""
+    project_dir = tmp_path / ".agents" / "skills"
+    project_dir.mkdir(parents=True)
+    resolved_npx = str(tmp_path / "nodejs" / "npx.CMD")
+    captured_args: tuple[str, ...] = ()
+
+    class _FakeStream:
+        async def __aiter__(self):
+            yield b"Done\n"
+
+    class _FakeProcess:
+        returncode: int | None = None
+        stdout = _FakeStream()
+
+        async def wait(self) -> int:
+            self.returncode = 0
+            return 0
+
+        def kill(self) -> None:
+            pass
+
+    async def _fake_create_subprocess_exec(*args: str, **_kwargs: object):
+        nonlocal captured_args
+        captured_args = args
+        return _FakeProcess()
+
+    monkeypatch.setattr(shutil, "which", lambda _cmd: resolved_npx)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+
+    installer = SkillInstaller(
+        user_dir=tmp_path / "user" / "skills",
+        project_dir=project_dir,
+    )
+    asyncio.run(installer.install("owner/repo"))
+
+    assert captured_args[0] == resolved_npx

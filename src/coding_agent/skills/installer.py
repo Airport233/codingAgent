@@ -38,7 +38,8 @@ class SkillInstaller:
         self._timeout = timeout
 
     async def install(self, source: str) -> InstallResult:
-        if shutil.which("npx") is None:
+        npx_executable = shutil.which("npx")
+        if npx_executable is None:
             return InstallResult(
                 (),
                 "npx is not installed. Install Node.js (https://nodejs.org) to use skill install.",
@@ -50,7 +51,7 @@ class SkillInstaller:
             # from the same project root the loader scans so install and
             # discovery can never disagree.
             process = await asyncio.create_subprocess_exec(
-                "npx",
+                npx_executable,
                 "-y",
                 "skills",
                 "add",
