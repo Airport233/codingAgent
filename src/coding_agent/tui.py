@@ -721,6 +721,7 @@ class CodingAgentTui(App[None]):
             return
         event.text_area.clear()
         if prompt.startswith("/"):
+            await self._mount(_render_user_message(prompt), force_scroll=True)
             await self._command(prompt)
             return
         await self._start_turn(prompt)
@@ -731,11 +732,13 @@ class CodingAgentTui(App[None]):
         *,
         skill_name: str | None = None,
         history_prompt: str | None = None,
+        echo: bool = True,
     ) -> None:
         if self._turn_worker is not None and self._turn_worker.is_running:
             await self._notice("A turn is already running. Press Ctrl+C to cancel it.", "warning")
             return
-        await self._mount(_render_user_message(prompt), force_scroll=True)
+        if echo:
+            await self._mount(_render_user_message(prompt), force_scroll=True)
         self._prompt_history.append(history_prompt or prompt)
         self._history_index = None
         self._last_history_text = None
@@ -912,6 +915,7 @@ class CodingAgentTui(App[None]):
             else:
                 composer.clear()
                 self._hide_completion()
+                await self._mount(_render_user_message(selected), force_scroll=True)
                 await self._command(selected)
         elif self._completion_mode == "models":
             if complete_only:
@@ -920,6 +924,7 @@ class CodingAgentTui(App[None]):
             else:
                 composer.clear()
                 self._hide_completion()
+                await self._mount(_render_user_message(f"/model {selected}"), force_scroll=True)
                 await self._command(f"/model {selected}")
         elif self._completion_mode == "skills":
             composer.value = f"/skill {selected} "
@@ -1075,7 +1080,7 @@ class CodingAgentTui(App[None]):
             if skill_name not in available:
                 await self._notice(f"Unknown skill: {skill_name}. Use /skills.", "error")
                 return
-            await self._start_turn(task, skill_name=skill_name, history_prompt=prompt)
+            await self._start_turn(task, skill_name=skill_name, history_prompt=prompt, echo=False)
         elif prompt == "/model":
             choices = ", ".join(self.available_models) or self.model
             await self._notice(f"Model: {self.model}\nAvailable: {choices}", "info")
@@ -1147,35 +1152,40 @@ class CodingAgentTui(App[None]):
             await self._notice(message, "info")
         elif prompt == "/compact":
             progress = CompactionProgress()
-            await self._mount(progress)
-            composer = self.query_one("#composer", PromptTextArea)
-            composer.disabled = True
-            try:
-                checkpoint = await self.application.compact_context()
-            except Exception:
-                progress.finish("Context compaction failed; original context retained.", "error")
-                return
-            finally:
-                composer.disabled = False
-                composer.focus()
-            self._refresh_context_label()
-            message = (
-                "Context is too short to compact."
-                if checkpoint is None
-                else (
-                    f"Compacted context with {checkpoint.strategy} summary: estimated "
-                    f"{checkpoint.before_tokens} → {checkpoint.after_tokens} tokens; "
-                    f"replaced {checkpoint.retained_from} exchanges, retained "
-                    f"{len(checkpoint.projected) - 1}."
-                )
-            )
-            progress.finish(message)
+            await self._mount(progress, force_scroll=True)
+            self.query_one("#composer", PromptTextArea).disabled = True
+            self.run_worker(self._run_compaction(progress), group="compaction", exclusive=True)
         elif prompt == "/exit":
             await self.action_quit_agent()
         else:
             await self._notice(
                 f"Unknown command: {prompt.split(maxsplit=1)[0]}. Use /help.", "error"
             )
+
+    async def _run_compaction(self, progress: CompactionProgress) -> None:
+        """Worker body for /compact; runs off the app's message pump."""
+        try:
+            checkpoint = await self.application.compact_context()
+        except Exception:
+            progress.finish("Context compaction failed; original context retained.", "error")
+            return
+        finally:
+            with suppress(NoMatches):
+                composer = self.query_one("#composer", PromptTextArea)
+                composer.disabled = False
+                composer.focus()
+        self._refresh_context_label()
+        message = (
+            "Context is too short to compact."
+            if checkpoint is None
+            else (
+                f"Compacted context with {checkpoint.strategy} summary: estimated "
+                f"{checkpoint.before_tokens} → {checkpoint.after_tokens} tokens; "
+                f"replaced {checkpoint.retained_from} exchanges, retained "
+                f"{len(checkpoint.projected) - 1}."
+            )
+        )
+        progress.finish(message)
 
     def _install_transition(self, transition: CliTransition) -> None:
         self.application = transition.application

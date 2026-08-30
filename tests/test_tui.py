@@ -1463,7 +1463,125 @@ async def test_manual_compaction_shows_indeterminate_progress_until_provider_fin
 
         release.set()
         await task
+        for _ in range(6):
+            await pilot.pause()
+        assert "Compacted context with provider summary" in str(progress.render())
+        assert app.query_one("#composer", PromptTextArea).disabled is False
+
+
+async def test_slash_command_echoes_as_user_message_and_forces_scroll_to_bottom() -> None:
+    history: tuple[ConversationExchange, ...] = tuple(
+        exchange
+        for index in range(6)
+        for exchange in (
+            UserExchange(f"question {index} " * 20),
+            AssistantExchange((TextBlock(f"answer {index} " * 20),), "end_turn"),
+        )
+    )
+    app = CodingAgentTui(
+        AgentApplication(
+            FakeProvider([]),
+            ToolDispatcher(ToolCatalog({})),
+            InMemorySessionStore(),
+            initial_exchanges=history,
+        ),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test(size=(80, 20)) as pilot:
         await pilot.pause()
+        conversation = app.query_one("#conversation", VerticalScroll)
+        conversation.scroll_home(animate=False)
+        await pilot.pause()
+        assert conversation.is_vertical_scroll_end is False
+
+        app.query_one("#composer").value = "/help"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert conversation.is_vertical_scroll_end is True
+        user_texts = app.query(".user-text")
+        assert any("/help" in _widget_text(widget) for widget in user_texts)
+
+
+async def test_compact_does_not_freeze_scrolling() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    summary = (
+        "task_goal: continue\n"
+        "user_constraints: none\n"
+        "decisions: none\n"
+        "files_read: none\n"
+        "files_modified: none\n"
+        "commands_and_results: none\n"
+        "verification_status: pending\n"
+        "known_failures: none\n"
+        "pending_work: continue"
+    )
+
+    class BlockingSummaryProvider:
+        async def stream(
+            self,
+            conversation: tuple[ConversationExchange, ...],
+            tools: tuple[ToolSpec, ...],
+            system_instructions: str | None = None,
+        ) -> AsyncIterator[ProviderEvent]:
+            del conversation, tools, system_instructions
+            started.set()
+            await release.wait()
+            yield ProviderResponseFinished(AssistantExchange((TextBlock(summary),), "end_turn"))
+
+    history: tuple[ConversationExchange, ...] = tuple(
+        exchange
+        for index in range(6)
+        for exchange in (
+            UserExchange(f"question {index} " * 20),
+            AssistantExchange((TextBlock(f"answer {index} " * 20),), "end_turn"),
+        )
+    )
+    application = AgentApplication(
+        BlockingSummaryProvider(),
+        ToolDispatcher(ToolCatalog({})),
+        InMemorySessionStore(),
+        initial_exchanges=history,
+        context_manager=ContextManager(
+            ContextBudget(context_window=20_000, max_output_tokens=2_000),
+            TokenEstimator(),
+            retained_exchanges=2,
+        ),
+    )
+    app = CodingAgentTui(
+        application,
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test(size=(80, 20)) as pilot:
+        await pilot.pause()
+        app.query_one("#composer").value = "/compact"
+        await pilot.press("enter")
+        await started.wait()
+        await pilot.pause()
+
+        assert app.query_one(".compaction-progress", CompactionProgress) is not None
+
+        # The compaction is still in flight; the view must stay scrollable.
+        conversation = app.query_one("#conversation", VerticalScroll)
+        conversation.scroll_home(animate=False)
+        await pilot.pause()
+        assert conversation.scroll_y == 0
+        conversation.scroll_end(animate=False)
+        await pilot.pause()
+        assert conversation.is_vertical_scroll_end is True
+
+        release.set()
+        for _ in range(6):
+            await pilot.pause()
+        progress = app.query_one(".compaction-progress", CompactionProgress)
         assert "Compacted context with provider summary" in str(progress.render())
         assert app.query_one("#composer", PromptTextArea).disabled is False
 
