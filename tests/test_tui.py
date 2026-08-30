@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
-from textual.containers import Vertical
+from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Collapsible, Label, OptionList
 
 import coding_agent.tui as tui_module
@@ -28,6 +28,7 @@ from coding_agent.domain import (
 from coding_agent.providers.base import (
     ProviderEvent,
     ProviderResponseFinished,
+    ProviderTextDelta,
     ProviderThinkingDelta,
 )
 from coding_agent.providers.fake import FakeProvider
@@ -953,6 +954,57 @@ async def test_thinking_panel_auto_expands_while_streaming_and_collapses_when_do
 
         assert thinking.collapsed is True
         assert thinking.title == "Thinking · complete"
+
+
+async def test_streaming_text_follows_the_bottom_unless_the_user_scrolled_away() -> None:
+    class StreamingTextProvider:
+        def __init__(self) -> None:
+            self.release = asyncio.Event()
+
+        async def stream(
+            self,
+            conversation: tuple[ConversationExchange, ...],
+            tools: tuple[ToolSpec, ...],
+            system_instructions: str | None = None,
+        ) -> AsyncIterator[ProviderEvent]:
+            del conversation, tools, system_instructions
+            yield ProviderTextDelta(text="first chunk\n" * 40)
+            await self.release.wait()
+            yield ProviderTextDelta(text="second chunk\n" * 40)
+            yield ProviderResponseFinished(
+                AssistantExchange(
+                    (TextBlock(("first chunk\n" * 40) + ("second chunk\n" * 40)),),
+                    "end_turn",
+                )
+            )
+
+    provider = StreamingTextProvider()
+    app = CodingAgentTui(
+        AgentApplication(provider, ToolDispatcher(ToolCatalog({})), InMemorySessionStore()),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test(size=(80, 20)) as pilot:
+        app.query_one("#composer").value = "Write a lot"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        conversation = app.query_one("#conversation", VerticalScroll)
+        assert conversation.is_vertical_scroll_end is True
+
+        conversation.scroll_home(animate=False)
+        await pilot.pause()
+        assert conversation.is_vertical_scroll_end is False
+        scroll_y_before = conversation.scroll_y
+
+        provider.release.set()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert conversation.scroll_y == scroll_y_before
+        assert conversation.is_vertical_scroll_end is False
 
 
 async def test_tui_replays_full_history_with_compaction_boundary_and_tool_inputs() -> None:

@@ -706,8 +706,10 @@ class CodingAgentTui(App[None]):
                             "", markup=False, classes="message assistant-message"
                         )
                         await self._mount(self._assistant)
+                    at_bottom = self._conversation_at_bottom()
                     self._assistant_text += event.text
                     self._assistant.update(self._assistant_text)
+                    self._follow_bottom_if(at_bottom)
                 elif isinstance(event, ThinkingStarted):
                     body = Static("Working…", markup=False, classes="thinking-body")
                     panel = Collapsible(
@@ -723,10 +725,7 @@ class CodingAgentTui(App[None]):
                     self._thinking_text += event.text
                     if self._thinking is not None:
                         self._thinking[1].update(self._thinking_text or "Working…")
-                        if at_bottom:
-                            self.query_one("#conversation", VerticalScroll).scroll_end(
-                                animate=False
-                            )
+                        self._follow_bottom_if(at_bottom)
                 elif isinstance(event, ThinkingFinished):
                     if self._thinking is not None:
                         self._thinking[0].title = "Thinking · complete"
@@ -773,6 +772,7 @@ class CodingAgentTui(App[None]):
         if item is None:
             return
         panel, body, title, details, tool_name, tool_args = item
+        at_bottom = self._conversation_at_bottom()
         panel.title = Content(f"{'✓' if not event.is_error else '✕'} {title} · {event.status}")
         panel.remove_class("running")
         panel.add_class("failed" if event.is_error else "succeeded")
@@ -780,6 +780,7 @@ class CodingAgentTui(App[None]):
         await body.remove()
         contents = panel.query_one("Contents")
         await contents.mount(*new_widgets)
+        self._follow_bottom_if(at_bottom)
 
     async def _command(self, prompt: str) -> None:
         if prompt == "/help":
@@ -1005,6 +1006,12 @@ class CodingAgentTui(App[None]):
     def _conversation_at_bottom(self) -> bool:
         return self.query_one("#conversation", VerticalScroll).is_vertical_scroll_end
 
+    def _follow_bottom_if(self, was_at_bottom: bool) -> None:
+        """Re-stick the view to the bottom after in-place content growth,
+        but only if the user hadn't scrolled away before the update."""
+        if was_at_bottom:
+            self.query_one("#conversation", VerticalScroll).scroll_end(animate=False)
+
     async def _mount_welcome(self) -> None:
         await self._mount(Static(self._welcome_text(), markup=False, id="brand"))
 
@@ -1051,7 +1058,9 @@ class CodingAgentTui(App[None]):
         """Replace streaming plain-text with rendered Markdown when it contains formatting."""
         if self._assistant is not None and self._assistant_text:
             if _has_markdown_formatting(self._assistant_text):
+                at_bottom = self._conversation_at_bottom()
                 self._assistant.update(RichMarkdown(self._assistant_text))
+                self._follow_bottom_if(at_bottom)
         self._assistant = None
         self._assistant_text = ""
 
