@@ -31,12 +31,26 @@ Screen {
 }
 
 .user-message {
-    margin-left: 8;
+    background: #1a1f2e;
+    padding: 1 2;
+    border-top: solid #243244;
 }
 
 .assistant-message {
     margin-right: 5;
     color: #f0f4f8;
+    width: 1fr;
+}
+
+.assistant-row {
+    height: auto;
+    margin-bottom: 1;
+}
+
+.bullet {
+    width: 2;
+    color: #6b7a8d;
+    padding: 1 0 0 0;
 }
 
 .notice {

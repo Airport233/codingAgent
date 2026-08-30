@@ -51,19 +51,23 @@ pytestmark = pytest.mark.asyncio
 
 
 def _widget_text(widget: object) -> str:
-    """Extract text from a Static, handling both plain strings and Rich renderables."""
+    """Extract text from a Static (or container of Statics)."""
     from rich.text import Text
 
     content = getattr(widget, "_Static__content", None)
-    if content is None:
-        return str(widget)
-    if isinstance(content, str):
-        return content
-    if isinstance(content, Text):
-        return content.plain
-    if hasattr(content, "markup"):
-        return content.markup
-    return str(content)
+    if content is not None:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, Text):
+            return content.plain
+        if hasattr(content, "markup"):
+            return content.markup
+        return str(content)
+    # For containers (Horizontal etc.), recurse into children.
+    if hasattr(widget, "children"):
+        parts = [_widget_text(child) for child in widget.children]
+        return "\n".join(p for p in parts if p and not p.startswith(str(type(widget).__name__)))
+    return str(widget)
 
 
 async def test_slash_help_uses_one_aligned_command_per_line() -> None:
@@ -1329,7 +1333,7 @@ async def test_tui_preserves_text_and_tool_chronology() -> None:
             "user"
             if child.has_class("user-message")
             else "assistant"
-            if child.has_class("assistant-message")
+            if child.has_class("assistant-row") or child.has_class("assistant-message")
             else "tool"
             if child.has_class("tool-card")
             else "other"

@@ -23,6 +23,7 @@ from rich.markdown import Markdown as RichMarkdown
 from rich.syntax import Syntax as RichSyntax
 from rich.text import Text as RichText
 from textual.content import Content
+from textual.widget import Widget
 from textual.widgets import Collapsible, Footer, Label, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 from textual.worker import Worker
@@ -777,10 +778,13 @@ class CodingAgentTui(App[None]):
                     self.push_screen(ApprovalScreen(event), self._approval_selected)
                 elif isinstance(event, TextDelta):
                     if self._assistant is None:
+                        row = Horizontal(classes="assistant-row")
+                        await self._mount(row)
+                        await row.mount(Static("·", markup=False, classes="bullet"))
                         self._assistant = Static(
                             "", markup=False, classes="message assistant-message"
                         )
-                        await self._mount(self._assistant)
+                        await row.mount(self._assistant)
                     at_bottom = self._conversation_at_bottom()
                     self._assistant_text += event.text
                     self._assistant.update(self._assistant_text)
@@ -827,7 +831,7 @@ class CodingAgentTui(App[None]):
         expand = event.tool_name in ("edit_file", "write_file")
         panel = Collapsible(
             body,
-            title=Content(f"● {_tool_title(event)} · running"),
+            title=Content(f"· {_tool_title(event)} · running"),
             collapsed=not expand,
             classes="tool-card running",
         )
@@ -842,7 +846,7 @@ class CodingAgentTui(App[None]):
             return
         panel, body, title, details, tool_name, tool_args = item
         at_bottom = self._conversation_at_bottom()
-        panel.title = Content(f"{'✓' if not event.is_error else '✕'} {title} · {event.status}")
+        panel.title = Content(f"· {'✓' if not event.is_error else '✕'} {title} · {event.status}")
         panel.remove_class("running")
         panel.add_class("failed" if event.is_error else "succeeded")
         new_widgets = _render_tool_body(tool_name, tool_args, event.content)
@@ -1066,7 +1070,7 @@ class CodingAgentTui(App[None]):
         await self._render_recovered_history()
 
     async def _mount(
-        self, widget: Static | Collapsible, *, force_scroll: bool = False
+        self, widget: Widget, *, force_scroll: bool = False
     ) -> None:
         conversation = self.query_one("#conversation", VerticalScroll)
         was_at_bottom = conversation.is_vertical_scroll_end
@@ -1220,7 +1224,7 @@ class CodingAgentTui(App[None]):
         expand = call.name in ("edit_file", "write_file")
         panel = Collapsible(
             *body_widgets,
-            title=Content(f"{'✕' if failed else '✓'} {title} · {status}"),
+            title=Content(f"· {'✕' if failed else '✓'} {title} · {status}"),
             collapsed=not expand,
             classes="tool-card failed" if failed else "tool-card succeeded",
         )
@@ -1320,10 +1324,13 @@ def _has_markdown_formatting(text: str) -> bool:
     return _MD_PATTERN.search(text) is not None
 
 
-def _render_assistant_content(text: str) -> Static:
+def _render_assistant_content(text: str) -> Horizontal:
+    bullet = Static("·", markup=False, classes="bullet")
     if _has_markdown_formatting(text):
-        return Static(RichMarkdown(text), classes="message assistant-message")
-    return Static(text, markup=False, classes="message assistant-message")
+        content = Static(RichMarkdown(text), classes="message assistant-message")
+    else:
+        content = Static(text, markup=False, classes="message assistant-message")
+    return Horizontal(bullet, content, classes="assistant-row")
 
 
 def _render_tool_body(
@@ -1338,7 +1345,7 @@ def _render_tool_body(
         if isinstance(command, str):
             text.append("Command:\n", style="bold")
             text.append_text(_renderable_to_text(RichSyntax(
-                command, "bash", theme="dracula", background_color="#0a0e13", padding=(0, 1),
+                command, "bash", theme="dracula", padding=(0, 1),
             )))
             text.append("\n")
         text.append("Output:\n", style="bold")
