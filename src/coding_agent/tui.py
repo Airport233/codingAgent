@@ -713,18 +713,24 @@ class CodingAgentTui(App[None]):
                     panel = Collapsible(
                         body,
                         title="Thinking · working",
-                        collapsed=not self.thinking_visible,
+                        collapsed=False,
                         classes="thinking-card",
                     )
                     self._thinking = (panel, body)
                     await self._mount(panel)
                 elif isinstance(event, ThinkingDelta):
+                    at_bottom = self._conversation_at_bottom()
                     self._thinking_text += event.text
                     if self._thinking is not None:
                         self._thinking[1].update(self._thinking_text or "Working…")
+                        if at_bottom:
+                            self.query_one("#conversation", VerticalScroll).scroll_end(
+                                animate=False
+                            )
                 elif isinstance(event, ThinkingFinished):
                     if self._thinking is not None:
                         self._thinking[0].title = "Thinking · complete"
+                        self._thinking[0].collapsed = not self.thinking_visible
                 elif isinstance(event, ToolStarted):
                     await self._finish_assistant_segment()
                     await self._tool_started(event)
@@ -995,6 +1001,9 @@ class CodingAgentTui(App[None]):
         conversation = self.query_one("#conversation", VerticalScroll)
         await conversation.mount(widget)
         conversation.scroll_end(animate=False)
+
+    def _conversation_at_bottom(self) -> bool:
+        return self.query_one("#conversation", VerticalScroll).is_vertical_scroll_end
 
     async def _mount_welcome(self) -> None:
         await self._mount(Static(self._welcome_text(), markup=False, id="brand"))

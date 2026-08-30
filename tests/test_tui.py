@@ -25,7 +25,11 @@ from coding_agent.domain import (
     ToolUseBlock,
     UserExchange,
 )
-from coding_agent.providers.base import ProviderEvent, ProviderResponseFinished
+from coding_agent.providers.base import (
+    ProviderEvent,
+    ProviderResponseFinished,
+    ProviderThinkingDelta,
+)
 from coding_agent.providers.fake import FakeProvider
 from coding_agent.sessions.jsonl import SessionSummary
 from coding_agent.sessions.memory import InMemorySessionStore
@@ -904,6 +908,51 @@ async def test_tui_renders_collapsible_thinking_and_completed_tool_card() -> Non
         tool_body = _widget_text(tool.query_one(".tool-body"))
         assert "uv run pytest" in tool_body
         assert "all green" in tool_body
+
+
+async def test_thinking_panel_auto_expands_while_streaming_and_collapses_when_done() -> None:
+    class StreamingThinkingProvider:
+        def __init__(self) -> None:
+            self.release = asyncio.Event()
+
+        async def stream(
+            self,
+            conversation: tuple[ConversationExchange, ...],
+            tools: tuple[ToolSpec, ...],
+            system_instructions: str | None = None,
+        ) -> AsyncIterator[ProviderEvent]:
+            del conversation, tools, system_instructions
+            yield ProviderThinkingDelta(thinking="step one")
+            await self.release.wait()
+            yield ProviderResponseFinished(
+                AssistantExchange(
+                    (ThinkingBlock("step one"), TextBlock("done")), "end_turn"
+                )
+            )
+
+    provider = StreamingThinkingProvider()
+    app = CodingAgentTui(
+        AgentApplication(provider, ToolDispatcher(ToolCatalog({})), InMemorySessionStore()),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        app.query_one("#composer").value = "Think it through"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        thinking = app.query_one(".thinking-card", Collapsible)
+        assert thinking.collapsed is False
+        assert "step one" in _widget_text(thinking.query_one(".thinking-body"))
+
+        provider.release.set()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert thinking.collapsed is True
+        assert thinking.title == "Thinking · complete"
 
 
 async def test_tui_replays_full_history_with_compaction_boundary_and_tool_inputs() -> None:
