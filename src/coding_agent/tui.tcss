@@ -78,6 +78,23 @@ Screen {
     color: #b6c2d1;
 }
 
+.diff-header {
+    padding: 0 1;
+    color: #f0f4f8;
+}
+
+.diff-removed {
+    padding: 0 1;
+    background: #2d1214;
+    color: #f0f4f8;
+}
+
+.diff-added {
+    padding: 0 1;
+    background: #122d14;
+    color: #f0f4f8;
+}
+
 .thinking-body {
     padding: 0 1 0 1;
     color: #6b7a8d;

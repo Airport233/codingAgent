@@ -729,7 +729,7 @@ class CodingAgentTui(App[None]):
                     await self._finish_assistant_segment()
                     await self._tool_started(event)
                 elif isinstance(event, ToolFinished):
-                    self._tool_finished(event)
+                    await self._tool_finished(event)
                 elif isinstance(event, ContextUsageChanged):
                     self.query_one("#status-context", Label).update(
                         f"context ~{event.used_tokens}/{event.context_window} · {event.level}"
@@ -762,7 +762,7 @@ class CodingAgentTui(App[None]):
         )
         await self._mount(panel)
 
-    def _tool_finished(self, event: ToolFinished) -> None:
+    async def _tool_finished(self, event: ToolFinished) -> None:
         item = self._tools.get(event.call_id)
         if item is None:
             return
@@ -770,7 +770,10 @@ class CodingAgentTui(App[None]):
         panel.title = Content(f"{'✓' if not event.is_error else '✕'} {title} · {event.status}")
         panel.remove_class("running")
         panel.add_class("failed" if event.is_error else "succeeded")
-        body.update(_render_tool_body(tool_name, tool_args, event.content))
+        new_widgets = _render_tool_body(tool_name, tool_args, event.content)
+        await body.remove()
+        contents = panel.query_one("Contents")
+        await contents.mount(*new_widgets)
 
     async def _command(self, prompt: str) -> None:
         if prompt == "/help":
@@ -1132,13 +1135,12 @@ class CodingAgentTui(App[None]):
         started = ToolStarted(call.call_id, call.name, call.input)
         title = _tool_title(started)
         content = "interrupted before result" if result is None else result.content
-        rendered = _render_tool_body(call.name, call.input, content)
-        body = Static(rendered, markup=False, classes="tool-body")
+        body_widgets = _render_tool_body(call.name, call.input, content)
         failed = result is None or result.is_error
         status = "interrupted" if result is None else ("error" if result.is_error else "done")
         expand = call.name in ("edit_file", "write_file")
         panel = Collapsible(
-            body,
+            *body_widgets,
             title=Content(f"{'✕' if failed else '✓'} {title} · {status}"),
             collapsed=not expand,
             classes="tool-card failed" if failed else "tool-card succeeded",
@@ -1249,8 +1251,8 @@ def _render_assistant_content(text: str) -> Static:
 
 def _render_tool_body(
     tool_name: str, arguments: dict[str, object], result: str
-) -> object:
-    """Return a Rich renderable for the tool body."""
+) -> tuple[Static, ...]:
+    """Return one or more Static widgets for the tool body."""
     args_text = _tool_arguments(arguments)
     result_text = _preview_text(result or "(no output)", 12_000)
     if tool_name == "shell":
@@ -1264,12 +1266,12 @@ def _render_tool_body(
             text.append("\n")
         text.append("Output:\n", style="bold")
         text.append(result_text)
-        return text
+        return (Static(text, classes="tool-body"),)
     if tool_name == "edit_file":
         return _render_edit_diff(arguments, result_text)
     if tool_name == "write_file":
         return _render_write_summary(arguments, result_text)
-    return f"{args_text}\n\nResult:\n{result_text}"
+    return (Static(f"{args_text}\n\nResult:\n{result_text}", markup=False, classes="tool-body"),)
 
 
 def _render_edit_diff(arguments: dict[str, object], result_text: str) -> object:
@@ -1289,27 +1291,28 @@ def _render_edit_diff(arguments: dict[str, object], result_text: str) -> object:
     removed = len(old_lines)
     lang = _lang_from_path(path)
 
-    result = RichText()
-    result.append(f"Edited {path} (+{added} -{removed})\n", style="bold")
+    widgets: list[Static] = []
+    header = RichText(f"Edited {path} (+{added} -{removed})", style="bold")
+    widgets.append(Static(header, classes="diff-header"))
     if old_lines:
-        result.append_text(_renderable_to_text(RichSyntax(
-            expected, lang, theme="dracula", background_color="#2d1214",
-            line_numbers=True, start_line=start_line,
-        )))
+        rendered = _renderable_to_text(RichSyntax(
+            expected, lang, theme="dracula", line_numbers=True, start_line=start_line,
+        ))
+        widgets.append(Static(rendered, classes="diff-removed"))
     if new_lines:
-        result.append_text(_renderable_to_text(RichSyntax(
-            replacement, lang, theme="dracula", background_color="#122d14",
-            line_numbers=True, start_line=start_line,
-        )))
-    return result
+        rendered = _renderable_to_text(RichSyntax(
+            replacement, lang, theme="dracula", line_numbers=True, start_line=start_line,
+        ))
+        widgets.append(Static(rendered, classes="diff-added"))
+    return tuple(widgets)
 
 
-def _render_write_summary(arguments: dict[str, object], result_text: str) -> object:
+def _render_write_summary(arguments: dict[str, object], result_text: str) -> tuple[Static, ...]:
     """Render write_file with syntax-highlighted content on green background."""
     path = arguments.get("path", "?")
     content = arguments.get("content", "")
     if not isinstance(path, str) or not isinstance(content, str):
-        return result_text
+        return (Static(result_text, markup=False, classes="tool-body"),)
 
     lines = content.splitlines()
     added = len(lines)
@@ -1318,13 +1321,14 @@ def _render_write_summary(arguments: dict[str, object], result_text: str) -> obj
         preview += f"\n# ... +{len(lines) - 80} more lines"
     lang = _lang_from_path(path)
 
-    result = RichText()
-    result.append(f"Created {path} (+{added} lines)\n", style="bold")
-    result.append_text(_renderable_to_text(RichSyntax(
-        preview, lang, theme="dracula", background_color="#122d14",
-        line_numbers=True,
-    )))
-    return result
+    header = RichText(f"Created {path} (+{added} lines)", style="bold")
+    rendered = _renderable_to_text(RichSyntax(
+        preview, lang, theme="dracula", line_numbers=True,
+    ))
+    return (
+        Static(header, classes="diff-header"),
+        Static(rendered, classes="diff-added"),
+    )
 
 
 _LANG_MAP = {
