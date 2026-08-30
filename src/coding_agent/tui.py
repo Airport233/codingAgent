@@ -1026,8 +1026,11 @@ class CodingAgentTui(App[None]):
         was_at_bottom = conversation.is_vertical_scroll_end
         await conversation.mount(widget)
         if force_scroll or was_at_bottom:
+            # Don't call scroll_end here -- it would use a stale virtual
+            # size and corrupt _stick_to_bottom via the scroll_y watch.
+            # Just set the flag; the virtual_size watch fires after the
+            # layout pass and scrolls with the correct size.
             self._stick_to_bottom = True
-            conversation.scroll_end(animate=False, immediate=True)
 
     def _conversation_at_bottom(self) -> bool:
         return self.query_one("#conversation", VerticalScroll).is_vertical_scroll_end
@@ -1037,9 +1040,6 @@ class CodingAgentTui(App[None]):
         but only if the user hadn't scrolled away before the update."""
         if was_at_bottom:
             self._stick_to_bottom = True
-            self.query_one("#conversation", VerticalScroll).scroll_end(
-                animate=False, immediate=True
-            )
 
     async def _mount_welcome(self) -> None:
         await self._mount(Static(self._welcome_text(), markup=False, id="brand"))
