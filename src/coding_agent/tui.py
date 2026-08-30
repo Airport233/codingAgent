@@ -480,8 +480,15 @@ class CodingAgentTui(App[None]):
         self._update_mode_indicator()
         self.query_one("#composer", PromptTextArea).focus()
 
-    def _maybe_stick_to_bottom(self) -> None:
-        if self._stick_to_bottom:
+    def _maybe_stick_to_bottom(self, old_size: object, new_size: object) -> None:
+        # Only follow when content GREW (new content added).  When content
+        # SHRINKS (e.g. a thinking panel collapsing on ThinkingFinished),
+        # scrolling would yank a user who scrolled up mid-turn, because
+        # _stick_to_bottom might still be True from before the scroll-up
+        # was processed.
+        old_h = getattr(old_size, "height", 0) or 0
+        new_h = getattr(new_size, "height", 0) or 0
+        if new_h >= old_h and self._stick_to_bottom:
             self.query_one("#conversation", VerticalScroll).scroll_end(
                 animate=False, immediate=True
             )
@@ -750,7 +757,10 @@ class CodingAgentTui(App[None]):
                 elif isinstance(event, ThinkingFinished):
                     if self._thinking is not None:
                         self._thinking[0].title = "Thinking · complete"
-                        self._thinking[0].collapsed = not self.thinking_visible
+                        # Note: we intentionally do NOT auto-collapse here.
+                        # Collapsing a Collapsible triggers a layout pass that
+                        # adjusts scroll_y, yanking users who scrolled up.
+                        # The user can collapse manually via Ctrl+T.
                 elif isinstance(event, ToolStarted):
                     await self._finish_assistant_segment()
                     await self._tool_started(event)

@@ -901,7 +901,7 @@ async def test_tui_renders_collapsible_thinking_and_completed_tool_card() -> Non
 
         thinking = app.query_one(".thinking-card", Collapsible)
         tool = app.query_one(".tool-card", Collapsible)
-        assert thinking.collapsed is True
+        assert thinking.collapsed is False
         assert thinking.title == "Thinking · complete"
         title_text = str(tool.title)
         assert "local bash" in title_text
@@ -952,7 +952,9 @@ async def test_thinking_panel_auto_expands_while_streaming_and_collapses_when_do
         await pilot.pause()
         await pilot.pause()
 
-        assert thinking.collapsed is True
+        # Panel stays expanded (auto-collapse was removed because it
+        # triggers a layout pass that yanks scrolled-up users).
+        assert thinking.collapsed is False
         assert thinking.title == "Thinking · complete"
 
 
