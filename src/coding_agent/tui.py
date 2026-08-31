@@ -36,6 +36,7 @@ from coding_agent.domain import (
     AssistantExchange,
     CompactionRecord,
     ConversationExchange,
+    ProviderContinuationExchange,
     RedactedThinkingBlock,
     TextBlock,
     ThinkingBlock,
@@ -1361,6 +1362,9 @@ class CodingAgentTui(App[None]):
             return
         if isinstance(exchange, ToolContinuationExchange):
             await self._render_recovered_assistant(exchange.assistant, exchange.results)
+            return
+        if isinstance(exchange, ProviderContinuationExchange):
+            await self._render_recovered_assistant(exchange.assistant, ())
             return
         await self._render_recovered_assistant(exchange, ())
 

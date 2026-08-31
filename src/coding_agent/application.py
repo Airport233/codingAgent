@@ -17,6 +17,7 @@ from coding_agent.domain import (
     CompactionRecord,
     Conversation,
     ConversationExchange,
+    ProviderContinuationExchange,
     RedactedThinkingBlock,
     ThinkingBlock,
     ToolContinuationExchange,
@@ -416,10 +417,17 @@ class AgentApplication:
                     retry_attempt = request_attempt + 1
                     await self._record_provider_retry(reason="max_tokens", attempt=retry_attempt)
                     yield WarningRaised(
-                        "Provider reached the output limit; retrying with a shorter response "
+                        "Provider reached the output limit; continuing the response "
                         f"({retry_attempt}/{self._response_retry_limit})"
                     )
-                    retry_guidance = self._max_tokens_retry_guidance()
+                    continuation = ProviderContinuationExchange(
+                        response,
+                        self._max_tokens_continuation_instruction(),
+                    )
+                    self._conversation.exchanges.append(continuation)
+                    await self._sessions.append("provider_continuation", continuation)
+                    request_history = (*request_history, continuation)
+                    retry_guidance = None
                     continue
                 break
 
@@ -791,12 +799,13 @@ class AgentApplication:
         )
 
     @staticmethod
-    def _max_tokens_retry_guidance() -> str:
+    def _max_tokens_continuation_instruction() -> str:
         return (
-            "<provider-retry>\n"
-            "The previous response reached the output limit and was discarded. Regenerate "
-            "a shorter, complete response. Be concise and prefer tool calls over explanation.\n"
-            "</provider-retry>"
+            "<provider-continuation>\n"
+            "The previous response reached the output limit. Continue from exactly where it "
+            "stopped. Do not repeat the prior analysis. Complete the current reasoning, and "
+            "prefer a valid tool call over additional explanation as soon as you are ready.\n"
+            "</provider-continuation>"
         )
 
     def _redacted_text(self, value: object) -> str:

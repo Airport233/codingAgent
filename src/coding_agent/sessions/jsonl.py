@@ -18,6 +18,7 @@ from coding_agent.domain import (
     CompactionRecord,
     ContentBlock,
     ConversationExchange,
+    ProviderContinuationExchange,
     RedactedThinkingBlock,
     StopReason,
     TextBlock,
@@ -476,6 +477,14 @@ def _replay(
             conversation_models.append(pending_model)
             pending = None
             pending_model = None
+        elif event.kind == "provider_continuation":
+            if pending is not None:
+                raise SessionCorruptError(
+                    "Provider continuation appeared before pending tool results"
+                )
+            continuation = _decode_provider_continuation(event.payload)
+            conversation.append(continuation)
+            conversation_models.append(model)
         elif event.kind == "compaction_completed":
             compaction = _require_dict(event.payload, "compaction checkpoint")
             compactions.append(CompactionRecord(len(conversation), compaction))
@@ -502,6 +511,12 @@ def _encode_payload(payload: object) -> object:
                 }
                 for result in payload.results
             ],
+        }
+    if isinstance(payload, ProviderContinuationExchange):
+        return {
+            "type": "provider_continuation",
+            "assistant": _encode_assistant_exchange(payload.assistant),
+            "instruction": payload.instruction,
         }
     return payload
 
@@ -562,6 +577,14 @@ def _decode_assistant_exchange(value: object) -> AssistantExchange:
         blocks=tuple(_decode_content_block(item) for item in raw_blocks),
         stop_reason=cast(StopReason, stop_reason),
         usage=cast(dict[str, int], usage_value),
+    )
+
+
+def _decode_provider_continuation(value: object) -> ProviderContinuationExchange:
+    mapping = _require_mapping(value, "provider continuation")
+    return ProviderContinuationExchange(
+        assistant=_decode_assistant_exchange(mapping.get("assistant")),
+        instruction=_require_string(mapping, "instruction"),
     )
 
 

@@ -18,6 +18,7 @@ from coding_agent.domain import (
     AssistantExchange,
     CompactionRecord,
     ConversationExchange,
+    ProviderContinuationExchange,
     TextBlock,
     ThinkingBlock,
     ToolContinuationExchange,
@@ -1397,6 +1398,41 @@ async def test_recovered_thinking_card_has_no_spinner() -> None:
         await asyncio.sleep(0.3)
         await pilot.pause()
         assert card.query_one(".thinking-title").render().plain == title
+
+
+async def test_recovered_provider_continuation_hides_internal_instruction() -> None:
+    internal_instruction = "Continue without repeating the previous analysis."
+    history = (
+        UserExchange("solve a long task"),
+        ProviderContinuationExchange(
+            AssistantExchange(
+                (ThinkingBlock("reasoning before truncation", signature="signed"),),
+                "max_tokens",
+            ),
+            internal_instruction,
+        ),
+        AssistantExchange((TextBlock("completed answer"),), "end_turn"),
+    )
+    app = CodingAgentTui(
+        AgentApplication(
+            FakeProvider([]),
+            ToolDispatcher(ToolCatalog({})),
+            InMemorySessionStore(),
+            initial_exchanges=history,
+        ),
+        model="provider/model",
+        workspace="/tmp/project",
+        session_id="session-1",
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        conversation = app.query_one("#conversation")
+        rendered = "\n".join(_widget_text(child) for child in conversation.children)
+
+        assert "reasoning before truncation" in rendered
+        assert "completed answer" in rendered
+        assert internal_instruction not in rendered
 
 
 async def test_manual_compaction_shows_indeterminate_progress_until_provider_finishes() -> None:

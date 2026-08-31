@@ -11,6 +11,7 @@ import pytest
 import coding_agent.sessions.jsonl as jsonl_module
 from coding_agent.domain import (
     AssistantExchange,
+    ProviderContinuationExchange,
     RedactedThinkingBlock,
     TextBlock,
     ThinkingBlock,
@@ -100,6 +101,43 @@ async def test_jsonl_round_trip_preserves_raw_blocks_usage_and_tool_metadata(
     assert len(recovered.compactions) == 1
     assert recovered.compactions[0].exchange_index == 3
     assert recovered.compactions[0].payload == checkpoint
+
+
+@pytest.mark.asyncio
+async def test_jsonl_round_trip_preserves_internal_provider_continuation(
+    roots: tuple[Path, Path, Path],
+) -> None:
+    data_root, project, _ = roots
+    repository = JsonlSessionRepository(data_root)
+    store = await repository.create(project)
+    user = UserExchange("solve a long task")
+    partial = AssistantExchange(
+        (
+            ThinkingBlock(
+                "partial reasoning",
+                signature="signed",
+                raw={
+                    "type": "thinking",
+                    "thinking": "partial reasoning",
+                    "signature": "signed",
+                },
+            ),
+        ),
+        "max_tokens",
+    )
+    continuation = ProviderContinuationExchange(partial, "Continue without repeating analysis.")
+
+    await store.append("user_exchange", user)
+    await store.append("provider_continuation", continuation)
+
+    recovered = await repository.resume_latest(project)
+
+    assert recovered is not None
+    assert recovered.conversation == (user, continuation)
+    raw_events = [
+        json.loads(line) for line in store.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [event["kind"] for event in raw_events].count("user_exchange") == 1
 
 
 @pytest.mark.asyncio

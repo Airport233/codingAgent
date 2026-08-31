@@ -9,6 +9,7 @@ from coding_agent.context import ContextBudget, ContextManager, TokenEstimator
 from coding_agent.domain import (
     AssistantExchange,
     ConversationExchange,
+    ProviderContinuationExchange,
     RedactedThinkingBlock,
     TextBlock,
     ThinkingBlock,
@@ -78,6 +79,23 @@ def test_provider_usage_calibrates_future_estimates_without_claiming_exact_statu
     assert status.last_provider_input_tokens == 20
 
 
+def test_context_status_counts_provider_continuation_content() -> None:
+    manager = ContextManager(
+        ContextBudget(context_window=1_000, max_output_tokens=100),
+        TokenEstimator(),
+    )
+    partial = AssistantExchange(
+        (ThinkingBlock("continued reasoning " * 20, signature="signed"),),
+        "max_tokens",
+    )
+    continuation = ProviderContinuationExchange(partial, "Continue without repeating analysis.")
+
+    baseline = manager.status((UserExchange("task"),)).used_tokens
+    continued = manager.status((UserExchange("task"), continuation)).used_tokens
+
+    assert continued > baseline
+
+
 def test_model_change_projection_removes_thinking_without_mutating_raw_history() -> None:
     tool_assistant = AssistantExchange(
         (
@@ -117,6 +135,28 @@ def test_model_change_projection_removes_thinking_without_mutating_raw_history()
     continuation = projected[2]
     assert isinstance(continuation, ToolContinuationExchange)
     assert continuation.assistant.blocks == (ToolUseBlock("call-1", "read_file", {"path": "a.py"}),)
+
+
+def test_model_change_projection_drops_thinking_only_provider_continuation() -> None:
+    user = UserExchange("solve the task")
+    continuation = ProviderContinuationExchange(
+        AssistantExchange(
+            (ThinkingBlock("model-bound reasoning", signature="signed"),),
+            "max_tokens",
+        ),
+        "Continue without repeating analysis.",
+    )
+    history = (user, continuation)
+    manager = ContextManager(
+        ContextBudget(context_window=1_000, max_output_tokens=100),
+        TokenEstimator(),
+        excluded_thinking_indices=frozenset({1}),
+    )
+
+    projected = manager.project(history)
+
+    assert projected == (user,)
+    assert history[1] == continuation
 
 
 def test_deterministic_compaction_keeps_complete_recent_exchanges() -> None:
