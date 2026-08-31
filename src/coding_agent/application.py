@@ -47,6 +47,7 @@ from coding_agent.providers.base import (
     ProviderResponseFinished,
     ProviderTextDelta,
     ProviderThinkingDelta,
+    RetryableProviderError,
 )
 from coding_agent.sessions.base import SessionStore
 from coding_agent.skills import SkillDefinition, SkillSnapshot
@@ -72,7 +73,10 @@ class AgentApplication:
         guardian_enabled: bool = False,
         skills: SkillSnapshot | None = None,
         base_prompt: str | None = None,
+        response_retry_limit: int = 2,
     ) -> None:
+        if response_retry_limit < 0:
+            raise ValueError("response_retry_limit must be non-negative")
         self._base_prompt = base_prompt
         self._provider = provider
         self._dispatcher = dispatcher
@@ -89,6 +93,7 @@ class AgentApplication:
         self._shell_classifier = shell_classifier
         self._guardian_enabled = guardian_enabled
         self._skills = skills or SkillSnapshot(())
+        self._response_retry_limit = response_retry_limit
         self._pending_approvals: dict[str, asyncio.Future[ApprovalDecision]] = {}
         self._closed = False
 
@@ -176,9 +181,7 @@ class AgentApplication:
             supplemental_characters=supplemental_characters,
         )
 
-    def _load_system_instructions(
-        self, active_skill: SkillDefinition | None = None
-    ) -> str | None:
+    def _load_system_instructions(self, active_skill: SkillDefinition | None = None) -> str | None:
         sections: list[str] = []
         if self._base_prompt:
             sections.append(self._base_prompt)
@@ -325,59 +328,100 @@ class AgentApplication:
                     return
             else:
                 request_history = self._conversation.snapshot()
-            thinking_active = False
-            thinking_seen_live = False
-            try:
-                async for event in self._provider.stream(
-                    request_history,
-                    self._dispatcher.catalog.specs,
-                    system_instructions,
-                ):
-                    if isinstance(event, ProviderThinkingDelta):
-                        thinking_seen_live = True
-                        if not thinking_active:
-                            thinking_active = True
-                            yield ThinkingStarted()
-                        yield ThinkingDelta(text=event.thinking)
-                    elif isinstance(event, ProviderTextDelta):
-                        if thinking_active:
-                            thinking_active = False
-                            yield ThinkingFinished()
-                        yield TextDelta(text=event.text)
-                    elif isinstance(event, ProviderResponseFinished):
-                        response = event.exchange
-            except asyncio.CancelledError:
-                if thinking_active:
-                    yield ThinkingFinished()
-                await self._sessions.append("turn_cancelled", {"phase": "provider_request"})
-                yield AgentCancelled(message="Provider request cancelled")
-                return
-            except Exception as error:
-                if thinking_active:
-                    yield ThinkingFinished()
-                message = self._redacted_text(error)
-                await self._sessions.append(
-                    "turn_failed", {"phase": "provider_request", "message": message}
+            retry_guidance: str | None = None
+            for request_attempt in range(self._response_retry_limit + 1):
+                response = None
+                thinking_active = False
+                thinking_seen_live = False
+                request_system_instructions = self._with_retry_guidance(
+                    system_instructions, retry_guidance
                 )
-                yield AgentFailed(message=f"Provider request failed: {message}")
-                return
+                try:
+                    async for event in self._provider.stream(
+                        request_history,
+                        self._dispatcher.catalog.specs,
+                        request_system_instructions,
+                    ):
+                        if isinstance(event, ProviderThinkingDelta):
+                            thinking_seen_live = True
+                            if not thinking_active:
+                                thinking_active = True
+                                yield ThinkingStarted()
+                            yield ThinkingDelta(text=event.thinking)
+                        elif isinstance(event, ProviderTextDelta):
+                            if thinking_active:
+                                thinking_active = False
+                                yield ThinkingFinished()
+                            yield TextDelta(text=event.text)
+                        elif isinstance(event, ProviderResponseFinished):
+                            response = event.exchange
+                except asyncio.CancelledError:
+                    if thinking_active:
+                        yield ThinkingFinished()
+                    await self._sessions.append("turn_cancelled", {"phase": "provider_request"})
+                    yield AgentCancelled(message="Provider request cancelled")
+                    return
+                except RetryableProviderError as error:
+                    if thinking_active:
+                        yield ThinkingFinished()
+                    if request_attempt < self._response_retry_limit:
+                        retry_attempt = request_attempt + 1
+                        await self._record_provider_retry(reason=error.code, attempt=retry_attempt)
+                        yield WarningRaised(
+                            "Provider returned an invalid response; retrying "
+                            f"({retry_attempt}/{self._response_retry_limit})"
+                        )
+                        retry_guidance = self._protocol_retry_guidance(self._redacted_text(error))
+                        continue
+                    message = self._redacted_text(error)
+                    failure = self._retry_exhausted_message(message)
+                    await self._sessions.append(
+                        "turn_failed", {"phase": "provider_request", "message": failure}
+                    )
+                    yield AgentFailed(message=f"Provider request failed: {failure}")
+                    return
+                except Exception as error:
+                    if thinking_active:
+                        yield ThinkingFinished()
+                    message = self._redacted_text(error)
+                    await self._sessions.append(
+                        "turn_failed", {"phase": "provider_request", "message": message}
+                    )
+                    yield AgentFailed(message=f"Provider request failed: {message}")
+                    return
 
-            if thinking_active:
-                yield ThinkingFinished()
-            elif not thinking_seen_live and response is not None:
-                recovered_thinking = "".join(
-                    block.thinking
-                    for block in response.blocks
-                    if isinstance(block, ThinkingBlock)
-                )
-                has_redacted_thinking = any(
-                    isinstance(block, RedactedThinkingBlock) for block in response.blocks
-                )
-                if recovered_thinking or has_redacted_thinking:
-                    yield ThinkingStarted()
-                    if recovered_thinking:
-                        yield ThinkingDelta(text=recovered_thinking)
+                if thinking_active:
                     yield ThinkingFinished()
+                elif not thinking_seen_live and response is not None:
+                    recovered_thinking = "".join(
+                        block.thinking
+                        for block in response.blocks
+                        if isinstance(block, ThinkingBlock)
+                    )
+                    has_redacted_thinking = any(
+                        isinstance(block, RedactedThinkingBlock) for block in response.blocks
+                    )
+                    if recovered_thinking or has_redacted_thinking:
+                        yield ThinkingStarted()
+                        if recovered_thinking:
+                            yield ThinkingDelta(text=recovered_thinking)
+                        yield ThinkingFinished()
+
+                if (
+                    response is not None
+                    and response.stop_reason == "max_tokens"
+                    and not response.tool_uses
+                    and request_attempt < self._response_retry_limit
+                ):
+                    retry_attempt = request_attempt + 1
+                    await self._record_provider_retry(reason="max_tokens", attempt=retry_attempt)
+                    yield WarningRaised(
+                        "Provider reached the output limit; retrying with a shorter response "
+                        f"({retry_attempt}/{self._response_retry_limit})"
+                    )
+                    retry_guidance = self._max_tokens_retry_guidance()
+                    continue
+                break
 
             if response is None:
                 message = "Provider response ended without a completed exchange"
@@ -670,9 +714,7 @@ class AgentApplication:
                             )
                     if stop_message is not None:
                         results.extend(
-                            self._no_progress_skipped_results(
-                                response.tool_uses[call_index + 1 :]
-                            )
+                            self._no_progress_skipped_results(response.tool_uses[call_index + 1 :])
                         )
                         break
                 continuation = ToolContinuationExchange(
@@ -696,6 +738,8 @@ class AgentApplication:
                 yield AgentCompleted(text=response.text)
                 return
             message = f"Provider stopped with reason: {response.stop_reason}"
+            if response.stop_reason == "max_tokens" and self._response_retry_limit:
+                message = self._retry_exhausted_message(message)
             await self._sessions.append("turn_failed", {"message": message})
             yield AgentFailed(message=message)
             return
@@ -715,6 +759,44 @@ class AgentApplication:
             used_tokens=status.used_tokens,
             context_window=status.context_window,
             level=status.level,
+        )
+
+    async def _record_provider_retry(self, *, reason: str, attempt: int) -> None:
+        await self._sessions.append(
+            "provider_retry",
+            {
+                "reason": reason,
+                "attempt": attempt,
+                "max_attempts": self._response_retry_limit,
+            },
+        )
+
+    def _retry_exhausted_message(self, message: str) -> str:
+        return f"{message} after {self._response_retry_limit} retries"
+
+    @staticmethod
+    def _with_retry_guidance(base: str | None, guidance: str | None) -> str | None:
+        if guidance is None:
+            return base
+        return f"{base}\n\n{guidance}" if base else guidance
+
+    @staticmethod
+    def _protocol_retry_guidance(error_message: str) -> str:
+        return (
+            "<provider-retry>\n"
+            f"The previous response was discarded because it contained {error_message}. "
+            "Regenerate the complete response and ensure every tool input is one valid "
+            "JSON object. Do not continue a partial tool call.\n"
+            "</provider-retry>"
+        )
+
+    @staticmethod
+    def _max_tokens_retry_guidance() -> str:
+        return (
+            "<provider-retry>\n"
+            "The previous response reached the output limit and was discarded. Regenerate "
+            "a shorter, complete response. Be concise and prefer tool calls over explanation.\n"
+            "</provider-retry>"
         )
 
     def _redacted_text(self, value: object) -> str:
@@ -750,9 +832,7 @@ class AgentApplication:
             )
             return (
                 warned_result,
-                WarningRaised(
-                    f"The same {call.name} call produced the same result twice in a row"
-                ),
+                WarningRaised(f"The same {call.name} call produced the same result twice in a row"),
                 None,
             )
         if observation.action == "stop":

@@ -140,8 +140,10 @@ def test_tool_json_is_parsed_only_when_block_stops() -> None:
         }
     )
 
-    with pytest.raises(AnthropicProtocolError, match="invalid tool input JSON"):
+    with pytest.raises(AnthropicProtocolError, match="invalid tool input JSON") as captured:
         aggregator.consume({"type": "content_block_stop", "index": 0})
+
+    assert captured.value.code == "invalid_tool_input_json"
 
 
 def test_empty_tool_json_delta_is_a_valid_no_op() -> None:
