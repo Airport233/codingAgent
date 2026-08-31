@@ -5,8 +5,17 @@ from collections.abc import AsyncIterator
 import pytest
 
 from coding_agent.application import AgentApplication
-from coding_agent.domain import AssistantExchange, ConversationExchange, TextBlock, ToolUseBlock
+from coding_agent.domain import (
+    AssistantExchange,
+    ConversationExchange,
+    ProviderContinuationExchange,
+    TextBlock,
+    ThinkingBlock,
+    ToolUseBlock,
+    UserExchange,
+)
 from coding_agent.events import AgentCompleted, AgentFailed, ToolFinished, WarningRaised
+from coding_agent.providers.anthropic_messages import encode_conversation
 from coding_agent.providers.anthropic_stream import AnthropicProtocolError
 from coding_agent.providers.base import ProviderEvent, ProviderResponseFinished
 from coding_agent.providers.fake import FakeProvider
@@ -62,7 +71,7 @@ async def test_retryable_protocol_error_retries_the_same_request_with_failure_gu
 
 
 @pytest.mark.asyncio
-async def test_max_tokens_without_tools_retries_for_a_shorter_complete_response() -> None:
+async def test_max_tokens_without_tools_continues_from_the_partial_response() -> None:
     provider = FakeProvider(
         [
             AssistantExchange((TextBlock("partial answer"),), "max_tokens"),
@@ -82,11 +91,82 @@ async def test_max_tokens_without_tools_retries_for_a_shorter_complete_response(
     assert isinstance(events[-1], AgentCompleted)
     assert events[-1].text == "short complete answer"
     assert provider.request_count == 2
-    assert "shorter, complete response" in provider.system_instructions[1]
+    assert provider.requests[0] == (UserExchange("answer"),)
+    assert len(provider.requests[1]) == 2
+    continuation = provider.requests[1][-1]
+    assert isinstance(continuation, ProviderContinuationExchange)
+    assert continuation.assistant.text == "partial answer"
+    assert "do not repeat" in continuation.instruction.casefold()
     persisted = [record.payload for record in store.records if record.kind == "assistant_exchange"]
     assert [exchange.text for exchange in persisted] == ["short complete answer"]
+    assert store.kinds.count("provider_continuation") == 1
     retry = next(record.payload for record in store.records if record.kind == "provider_retry")
     assert retry["reason"] == "max_tokens"
+
+
+@pytest.mark.asyncio
+async def test_thinking_only_max_tokens_continues_from_the_preserved_response() -> None:
+    partial = AssistantExchange(
+        (
+            ThinkingBlock(
+                "long analysis up to the output boundary",
+                signature="signed-thinking",
+                raw={
+                    "type": "thinking",
+                    "thinking": "long analysis up to the output boundary",
+                    "signature": "signed-thinking",
+                },
+            ),
+        ),
+        "max_tokens",
+    )
+
+    class _ThinkingThenCompletes:
+        def __init__(self) -> None:
+            self.requests: list[list[dict[str, object]]] = []
+
+        async def stream(
+            self,
+            conversation: tuple[ConversationExchange, ...],
+            _tools: object,
+            _system_instructions: str | None = None,
+        ) -> AsyncIterator[ProviderEvent]:
+            self.requests.append(encode_conversation(conversation))
+            response = (
+                partial
+                if len(self.requests) == 1
+                else AssistantExchange((TextBlock("complete"),), "end_turn")
+            )
+            yield ProviderResponseFinished(exchange=response)
+
+    provider = _ThinkingThenCompletes()
+    application = AgentApplication(
+        provider,
+        ToolDispatcher(ToolCatalog({})),
+        InMemorySessionStore(),
+        response_retry_limit=2,
+    )
+
+    events = [event async for event in application.run("solve the task")]
+
+    assert isinstance(events[-1], AgentCompleted)
+    assert provider.requests[1][:2] == [
+        {"role": "user", "content": "solve the task"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "thinking",
+                    "thinking": "long analysis up to the output boundary",
+                    "signature": "signed-thinking",
+                }
+            ],
+        },
+    ]
+    continuation = provider.requests[1][2]
+    assert continuation["role"] == "user"
+    assert "continue" in str(continuation["content"]).casefold()
+    assert "do not repeat" in str(continuation["content"]).casefold()
 
 
 @pytest.mark.asyncio

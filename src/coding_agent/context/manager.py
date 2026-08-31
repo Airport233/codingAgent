@@ -8,6 +8,7 @@ from typing import Literal, cast
 from coding_agent.domain import (
     AssistantExchange,
     ConversationExchange,
+    ProviderContinuationExchange,
     RedactedThinkingBlock,
     ThinkingBlock,
     ToolContinuationExchange,
@@ -370,6 +371,9 @@ def _summarize(exchanges: Sequence[ConversationExchange]) -> str:
         elif isinstance(exchange, AssistantExchange):
             if exchange.text.strip():
                 decisions.append(_one_line(exchange.text))
+        elif isinstance(exchange, ProviderContinuationExchange):
+            if exchange.assistant.text.strip():
+                decisions.append(_one_line(exchange.assistant.text))
         elif isinstance(exchange, ToolContinuationExchange):
             for call, result in zip(exchange.assistant.tool_uses, exchange.results, strict=True):
                 path = call.input.get("path")
@@ -427,6 +431,16 @@ def _exchange_text(exchange: ConversationExchange) -> str:
             for result in exchange.results
         )
         return f"Assistant tools: {results}"
+    if isinstance(exchange, ProviderContinuationExchange):
+        thinking = "".join(
+            block.thinking
+            for block in exchange.assistant.blocks
+            if isinstance(block, ThinkingBlock)
+        )
+        return (
+            f"Assistant truncated: {thinking}{exchange.assistant.text} "
+            f"Continuation instruction: {exchange.instruction}"
+        )
     raise TypeError(f"Unsupported exchange: {type(exchange).__name__}")
 
 
@@ -438,6 +452,11 @@ def _without_thinking(exchange: ConversationExchange) -> ConversationExchange | 
         if assistant is None:
             raise ValueError("Tool continuation lost its tool-use blocks during projection")
         return ToolContinuationExchange(assistant, exchange.results)
+    if isinstance(exchange, ProviderContinuationExchange):
+        assistant = _assistant_without_thinking(exchange.assistant)
+        if assistant is None:
+            return None
+        return ProviderContinuationExchange(assistant, exchange.instruction)
     return _assistant_without_thinking(exchange)
 
 

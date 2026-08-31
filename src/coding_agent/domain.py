@@ -82,7 +82,23 @@ class ToolContinuationExchange:
             raise ValueError("tool results must match assistant tool calls in order")
 
 
-type ConversationExchange = UserExchange | AssistantExchange | ToolContinuationExchange
+@dataclass(frozen=True, slots=True)
+class ProviderContinuationExchange:
+    """A valid truncated response followed by an internal continuation request."""
+
+    assistant: AssistantExchange
+    instruction: str
+
+    def __post_init__(self) -> None:
+        if self.assistant.stop_reason != "max_tokens":
+            raise ValueError("provider continuation requires a max_tokens response")
+        if not self.instruction.strip():
+            raise ValueError("provider continuation instruction must not be empty")
+
+
+type ConversationExchange = (
+    UserExchange | AssistantExchange | ToolContinuationExchange | ProviderContinuationExchange
+)
 
 
 @dataclass(slots=True)

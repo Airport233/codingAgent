@@ -5,6 +5,7 @@ from copy import deepcopy
 from coding_agent.domain import (
     AssistantExchange,
     ConversationExchange,
+    ProviderContinuationExchange,
     RedactedThinkingBlock,
     TextBlock,
     ThinkingBlock,
@@ -40,6 +41,9 @@ def encode_conversation(
                     ],
                 }
             )
+        elif isinstance(exchange, ProviderContinuationExchange):
+            messages.append(_encode_assistant(exchange.assistant))
+            messages.append({"role": "user", "content": exchange.instruction})
     return messages
 
 
