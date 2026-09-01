@@ -451,9 +451,10 @@ sequenceDiagram
 摘要采用版本化结构：
 
 ```text
+context_summary_version
 task_goal
 user_constraints
-decisions
+decisions_and_rationale
 files_read
 files_modified
 commands_and_results
@@ -461,6 +462,8 @@ verification_status
 known_failures
 pending_work
 ```
+
+版本 2 的 `decisions_and_rationale` 以 `Decision`、`Why`、`Authority` 保存长期有效的选择、依据和决策来源；没有对话证据的依据必须标为 `not recorded`。Provider 新生成的摘要必须满足版本 2 契约，恢复路径仍接受已持久化的版本 1 `decisions` 字段，避免旧会话失效。
 
 摘要外仍保留 ReadSet、当前模型、记忆摘要和最近完整 Exchange。摘要为空、格式无效或写盘失败时不得替换当前上下文。
 

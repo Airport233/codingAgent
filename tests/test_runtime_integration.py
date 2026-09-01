@@ -538,9 +538,11 @@ async def test_runtime_resume_restores_the_latest_compaction_checkpoint(tmp_path
         data_root=tmp_path / "data",
     )
     summary = (
+        "context_summary_version: 2\n"
         "task_goal: preserve the active task\n"
         "user_constraints: keep history durable\n"
-        "decisions: compact old exchanges\n"
+        "decisions_and_rationale: Decision: compact old exchanges; Why: keep the "
+        "active task within the context window; Authority: architecture\n"
         "files_read: none\n"
         "files_modified: none\n"
         "commands_and_results: none\n"
@@ -604,9 +606,11 @@ async def test_repl_accepts_multiple_turns_and_compacts_context(tmp_path: Path) 
             AssistantExchange(
                 (
                     TextBlock(
+                        "context_summary_version: 2\n"
                         "task_goal: answer the questions\n"
                         "user_constraints: none\n"
-                        "decisions: four answers supplied\n"
+                        "decisions_and_rationale: Decision: preserve four answers; "
+                        "Why: retain completed work; Authority: agent\n"
                         "files_read: none\n"
                         "files_modified: none\n"
                         "commands_and_results: none\n"

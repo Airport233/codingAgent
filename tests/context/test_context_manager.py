@@ -175,9 +175,12 @@ def test_deterministic_compaction_keeps_complete_recent_exchanges() -> None:
     assert isinstance(candidate.projected[0], UserExchange)
     assert candidate.projected[0].content.startswith("<coding-agent-context-checkpoint>")
     assert "historical background, not a new user request" in candidate.projected[0].content
-    assert "context_summary_version: 1" in candidate.summary
+    assert "context_summary_version: 2" in candidate.summary
     assert "task_goal: User: old task" not in candidate.summary
     assert "task_goal: old task" in candidate.summary
+    assert "decisions_and_rationale:" in candidate.summary
+    assert "Why: not recorded" in candidate.summary
+    assert "Authority: agent" in candidate.summary
     assert "files_read: a.py" in candidate.summary
     assert "commands_and_results: read_file" in candidate.summary
     assert all(not isinstance(item, ToolContinuationExchange) for item in candidate.projected[:1])
@@ -258,6 +261,83 @@ async def test_invalid_provider_summary_uses_independent_deterministic_fallback(
     completed = store.records[-1][1]
     assert isinstance(completed, dict)
     assert completed["strategy"] == "deterministic"
+
+
+@pytest.mark.asyncio
+async def test_provider_compaction_accepts_decisions_with_rationale_and_authority() -> None:
+    manager = ContextManager(
+        ContextBudget(context_window=400, max_output_tokens=20, auto_ratio=0.5),
+        TokenEstimator(),
+        retained_exchanges=2,
+    )
+    store = RecordingStore()
+    summary = (
+        "context_summary_version: 2\n"
+        "task_goal: finish the parser\n"
+        "user_constraints: preserve compatibility\n"
+        "decisions_and_rationale: Decision: keep JSONL; Why: resume must remain "
+        "auditable; Authority: architecture\n"
+        "files_read: parser.py\n"
+        "files_modified: none\n"
+        "commands_and_results: tests pending\n"
+        "verification_status: pending\n"
+        "known_failures: none\n"
+        "pending_work: implement the parser"
+    )
+
+    async def summarize(_history: tuple[ConversationExchange, ...]) -> str:
+        return summary
+
+    checkpoint = await manager.compact(
+        exchanges(80),
+        reason="manual",
+        persist=store.append,
+        summarize=summarize,
+    )
+
+    assert checkpoint is not None
+    assert checkpoint.strategy == "provider"
+    assert checkpoint.summary == summary
+
+
+@pytest.mark.asyncio
+async def test_summary_request_explains_decision_rationale_contract() -> None:
+    summary = (
+        "context_summary_version: 2\n"
+        "task_goal: finish the task\n"
+        "user_constraints: none\n"
+        "decisions_and_rationale: Decision: inspect first; Why: avoid blind edits; "
+        "Authority: agent\n"
+        "files_read: a.py\n"
+        "files_modified: none\n"
+        "commands_and_results: read succeeded\n"
+        "verification_status: pending\n"
+        "known_failures: none\n"
+        "pending_work: edit the file"
+    )
+    provider = FakeProvider(
+        [AssistantExchange((TextBlock(summary),), stop_reason="end_turn")]
+    )
+    application = AgentApplication(
+        provider,
+        ToolDispatcher(ToolCatalog({})),
+        InMemorySessionStore(),
+        initial_exchanges=exchanges(80),
+        context_manager=ContextManager(
+            ContextBudget(context_window=1_000, max_output_tokens=100),
+            TokenEstimator(),
+            retained_exchanges=2,
+        ),
+    )
+
+    checkpoint = await application.compact_context()
+
+    assert checkpoint is not None
+    instruction = provider.requests[0][-1]
+    assert isinstance(instruction, UserExchange)
+    assert "decisions_and_rationale" in instruction.content
+    assert "Decision, Why, and Authority" in instruction.content
+    assert "do not invent a rationale" in instruction.content
 
 
 @pytest.mark.asyncio
@@ -363,9 +443,11 @@ async def test_agent_auto_compacts_before_request_without_mutating_raw_history()
             AssistantExchange(
                 (
                     TextBlock(
+                        "context_summary_version: 2\n"
                         "task_goal: finish the task\n"
                         "user_constraints: keep changes focused\n"
-                        "decisions: inspect before editing\n"
+                        "decisions_and_rationale: Decision: inspect before editing; "
+                        "Why: avoid blind edits; Authority: agent\n"
                         "files_read: a.py\n"
                         "files_modified: none\n"
                         "commands_and_results: read_file succeeded\n"

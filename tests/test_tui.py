@@ -1439,9 +1439,10 @@ async def test_manual_compaction_shows_indeterminate_progress_until_provider_fin
     started = asyncio.Event()
     release = asyncio.Event()
     summary = (
+        "context_summary_version: 2\n"
         "task_goal: continue\n"
         "user_constraints: none\n"
-        "decisions: none\n"
+        "decisions_and_rationale: none\n"
         "files_read: none\n"
         "files_modified: none\n"
         "commands_and_results: none\n"
@@ -1547,9 +1548,10 @@ async def test_compact_does_not_freeze_scrolling() -> None:
     started = asyncio.Event()
     release = asyncio.Event()
     summary = (
+        "context_summary_version: 2\n"
         "task_goal: continue\n"
         "user_constraints: none\n"
-        "decisions: none\n"
+        "decisions_and_rationale: none\n"
         "files_read: none\n"
         "files_modified: none\n"
         "commands_and_results: none\n"
@@ -1734,9 +1736,10 @@ async def test_manual_compaction_refreshes_context_and_reports_projection_detail
             )
         )
     summary = (
+        "context_summary_version: 2\n"
         "task_goal: continue the test\n"
         "user_constraints: keep output short\n"
-        "decisions: none\n"
+        "decisions_and_rationale: none\n"
         "files_read: none\n"
         "files_modified: none\n"
         "commands_and_results: none\n"

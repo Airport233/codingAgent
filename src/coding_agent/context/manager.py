@@ -23,6 +23,18 @@ SummarizeContext = Callable[[tuple[ConversationExchange, ...]], Awaitable[str]]
 SUMMARY_FIELDS = (
     "task_goal",
     "user_constraints",
+    "decisions_and_rationale",
+    "files_read",
+    "files_modified",
+    "commands_and_results",
+    "verification_status",
+    "known_failures",
+    "pending_work",
+)
+
+LEGACY_SUMMARY_FIELDS = (
+    "task_goal",
+    "user_constraints",
     "decisions",
     "files_read",
     "files_modified",
@@ -262,7 +274,7 @@ class ContextManager:
                         is not None
                     )
                 generated = await summarize(summary_input)
-                if not _valid_structured_summary(generated):
+                if not _valid_current_summary(generated):
                     raise ValueError("Provider returned an invalid context summary")
                 candidate = self.prepare(
                     history,
@@ -325,7 +337,7 @@ class ContextManager:
             or before_tokens < 0
             or after_tokens < 0
             or after_tokens >= before_tokens
-            or not _valid_structured_summary(summary)
+            or not _valid_stored_summary(summary)
         ):
             raise ValueError("Invalid compaction checkpoint")
         strategy = cast(CompactionStrategy, strategy_value)
@@ -370,10 +382,10 @@ def _summarize(exchanges: Sequence[ConversationExchange]) -> str:
             user_messages.append(_one_line(exchange.content))
         elif isinstance(exchange, AssistantExchange):
             if exchange.text.strip():
-                decisions.append(_one_line(exchange.text))
+                decisions.append(_decision_with_unknown_rationale(exchange.text))
         elif isinstance(exchange, ProviderContinuationExchange):
             if exchange.assistant.text.strip():
-                decisions.append(_one_line(exchange.assistant.text))
+                decisions.append(_decision_with_unknown_rationale(exchange.assistant.text))
         elif isinstance(exchange, ToolContinuationExchange):
             for call, result in zip(exchange.assistant.tool_uses, exchange.results, strict=True):
                 path = call.input.get("path")
@@ -389,7 +401,7 @@ def _summarize(exchanges: Sequence[ConversationExchange]) -> str:
     values = {
         "task_goal": _joined(user_messages[:1], 120),
         "user_constraints": _joined(user_messages[1:], 160),
-        "decisions": _joined(decisions, 180),
+        "decisions_and_rationale": _joined(decisions, 300),
         "files_read": _joined(sorted(files_read), 100),
         "files_modified": _joined(sorted(files_modified), 100),
         "commands_and_results": _joined(commands_and_results, 240),
@@ -399,7 +411,7 @@ def _summarize(exchanges: Sequence[ConversationExchange]) -> str:
         "known_failures": _joined(failures, 120),
         "pending_work": "continue from retained exchanges",
     }
-    lines = ["context_summary_version: 1", "strategy: deterministic"]
+    lines = ["context_summary_version: 2", "strategy: deterministic"]
     lines.extend(f"{field}: {values[field]}" for field in SUMMARY_FIELDS)
     return "\n".join(lines)[:1600]
 
@@ -412,11 +424,39 @@ def _joined(values: Sequence[str], limit: int) -> str:
     return (" | ".join(value for value in values if value) or "unknown")[:limit]
 
 
-def _valid_structured_summary(summary: str) -> bool:
+def _decision_with_unknown_rationale(value: str) -> str:
+    decision = _one_line(value)[:160]
+    return f"Decision: {decision}; Why: not recorded; Authority: agent"
+
+
+def _summary_values(summary: str) -> dict[str, str]:
+    return {
+        key.strip(): value.strip()
+        for line in summary.splitlines()
+        if ":" in line
+        for key, _separator, value in (line.partition(":"),)
+    }
+
+
+def _valid_current_summary(summary: str) -> bool:
     if not summary.strip():
         return False
-    present = {line.partition(":")[0].strip() for line in summary.splitlines() if ":" in line}
-    return all(field in present for field in SUMMARY_FIELDS)
+    values = _summary_values(summary)
+    if values.get("context_summary_version") != "2":
+        return False
+    if not all(values.get(field) for field in SUMMARY_FIELDS):
+        return False
+    decisions = values["decisions_and_rationale"]
+    if decisions.casefold() in {"none", "unknown", "(none)"}:
+        return True
+    return all(label in decisions for label in ("Decision:", "Why:", "Authority:"))
+
+
+def _valid_stored_summary(summary: str) -> bool:
+    if _valid_current_summary(summary):
+        return True
+    values = _summary_values(summary)
+    return bool(summary.strip()) and all(values.get(field) for field in LEGACY_SUMMARY_FIELDS)
 
 
 def _exchange_text(exchange: ConversationExchange) -> str:

@@ -211,11 +211,26 @@ class AgentApplication:
 
     async def _request_context_summary(self, exchanges: tuple[ConversationExchange, ...]) -> str:
         instruction = UserExchange(
-            "Summarize the preceding conversation as plain text with exactly these fields, "
-            "one per line: task_goal, user_constraints, decisions, files_read, "
-            "files_modified, commands_and_results, verification_status, known_failures, "
-            "pending_work. Preserve concrete paths, commands, results, constraints, and "
-            "unfinished work. Do not call tools."
+            "Summarize the preceding conversation as plain text using exactly the schema "
+            "below. Put each field on one line and do not add Markdown headings:\n"
+            "context_summary_version: 2\n"
+            "task_goal: <current objective>\n"
+            "user_constraints: <active user and project constraints>\n"
+            "decisions_and_rationale: <meaningful decisions>\n"
+            "files_read: <relevant paths>\n"
+            "files_modified: <changed paths>\n"
+            "commands_and_results: <important commands and outcomes>\n"
+            "verification_status: <what was actually verified>\n"
+            "known_failures: <current failures or none>\n"
+            "pending_work: <concrete next work>\n"
+            "For every meaningful item in decisions_and_rationale, include Decision, Why, "
+            "and Authority in this form: Decision: <choice>; Why: <reason>; Authority: "
+            "<user|project specification|architecture|agent|unknown>. Separate multiple "
+            "decisions with ' | '. Preserve user-authorized decisions over agent choices. "
+            "If the reason was not stated or cannot be supported by the conversation, write "
+            "'Why: not recorded'; do not invent a rationale. Keep the current decision when "
+            "a newer instruction supersedes an older one. Preserve concrete paths, commands, "
+            "results, constraints, failures, and unfinished work. Do not call tools."
         )
         response: AssistantExchange | None = None
         async for event in self._provider.stream((*exchanges, instruction), (), None):

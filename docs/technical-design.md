@@ -311,7 +311,7 @@ expected_file_hash
 
 压缩不得依赖百炼或 Anthropic 的服务端上下文管理功能。
 
-压缩 checkpoint 在本地以独立状态管理：JSONL 继续保留原始会话，模型请求则投影为“明确标识的历史摘要 + 未压缩的近期 exchange”。摘要标记同时说明其只是背景，不是新的用户指令。
+压缩 checkpoint 在本地以独立状态管理：JSONL 继续保留原始会话，模型请求则投影为“明确标识的历史摘要 + 未压缩的近期 exchange”。摘要标记同时说明其只是背景，不是新的用户指令。新版摘要把关键决策表示为 `Decision`、`Why` 和 `Authority`；证据不足时写入 `Why: not recorded`，不得让摘要模型补造原因。恢复路径继续接受旧版 `decisions` 字段。
 
 ## 11. 会话存储技术方案
 
