@@ -18,12 +18,15 @@
   被标记为高风险的命令在 `auto` 模式下会被执行，但附带一条警告提示。
 - **会话持久化**——每一轮对话都会持久化写入 JSONL；可用 `/resume` 恢复、列出或
   回放历史会话。
-- **上下文自动压缩**——上下文占用逼近阈值时自动摘要旧对话，同时保证 system prompt
-  和最近几轮对话完整保留、不会被压缩掉。
+- **上下文管理与压缩**——通过 `/context` 查看容量；上下文逼近阈值时自动压缩，
+  也可用 `/compact` 主动触发。压缩后的结构化摘要保留任务目标、关键决策及原因、
+  验证状态和后续工作；原始 JSONL 历史不会被删除。
 - **无进展检测**——如果 agent 重复执行完全相同的工具调用并得到完全相同的结果，
   会先警告，连续三次则强制停止。
+- **项目记忆**——从项目根目录到当前工作目录逐级加载 `CODING_AGENT.md`，目录越近
+  优先级越高，用于持续提供项目约定和开发上下文。
 - **Agent Skills**——按需发现和加载的工作流（`code-review`、`test-fix`、
-  `project-map`、`project-init`，以及任何通过 `npx skills add` 安装的技能），
+  `project-map`、`project-init`，以及通过 `/skill install` 安装的技能），
   支持从内置、用户级、项目级三个目录发现。
 
 ## 环境要求
@@ -44,6 +47,7 @@ uv sync
 
 codingAgent 从一个 TOML 文件读取 provider 配置：
 
+- Windows：`%LOCALAPPDATA%\codingAgent\codingAgent\config.toml`
 - macOS：`~/Library/Application Support/codingAgent/config.toml`
 - Linux：`~/.config/codingAgent/config.toml`
 
@@ -69,7 +73,13 @@ thinking_mode = "disabled"     # disabled | effort | enabled_budget
 通用覆盖变量）：
 
 ```bash
-export ANTHROPIC_API_KEY="sk-..."
+export ANTHROPIC_API_KEY="your-api-key"
+```
+
+PowerShell：
+
+```powershell
+$env:ANTHROPIC_API_KEY = "your-api-key"
 ```
 
 任何配置项都可以在不改配置文件的情况下临时覆盖：
@@ -85,6 +95,19 @@ export ANTHROPIC_API_KEY="sk-..."
 
 ```bash
 uv run coding-agent
+```
+
+也可以从其他工作目录直接指定 codingAgent 项目和目标工作区：
+
+```bash
+uv run --project /path/to/codingAgent coding-agent --workspace /path/to/project
+```
+
+如需在任意目录直接使用 `coding-agent`，可以安装为 uv tool：
+
+```bash
+uv tool install .
+coding-agent --workspace /path/to/project
 ```
 
 常用参数：
@@ -121,6 +144,8 @@ uv run coding-agent --approval-mode auto            # 跳过手动审批
 | `/mode [auto\|ask\|deny]` | 查看或设置审批模式 |
 | `/skills` | 列出可用的编码工作流 |
 | `/skill <name> <task>` | 用指定 skill 执行一个任务 |
+| `/skill install <owner/repo 或 URL>` | 安装 skill |
+| `/skill uninstall <name>` | 卸载已安装的 skill |
 | `/context` | 查看上下文占用情况 |
 | `/compact` | 手动压缩对话上下文 |
 | `/resume` | 恢复一个已保存的会话 |
@@ -139,8 +164,8 @@ uv run coding-agent --approval-mode auto            # 跳过手动审批
 | `shell` | 执行 shell 命令，受审批策略约束 |
 | `activate_skill` / `read_skill_resource` | 发现并加载 Agent Skills |
 
-所有文件和 shell 操作都被限制在解析后的工作区根目录内；`WorkspaceGuard` 会
-拒绝任何试图越出工作区的路径。
+文件工具通过 `WorkspaceGuard` 限制在工作区根目录内。`shell` 的工作目录也必须位于
+工作区，并受超时、输出限制、风险分级和审批策略约束；它不提供 OS 级沙箱。
 
 ## 审批模式
 
@@ -163,8 +188,9 @@ codingAgent 会按优先级从三个位置发现 skill：
 2. 用户级（与 `config.toml` 同级的用户数据目录下的 `skills/`）
 3. 项目级（工作区内的 `.agents/skills`）
 
-可以通过 `npx skills add` 安装 [Agent Skills](https://github.com/anthropics/skills)
-生态里的更多技能（TUI 在尝试安装一个未识别的 skill 时会自动调用它）。
+可以使用 `/skill install <owner/repo 或 URL>` 安装
+[Agent Skills](https://github.com/anthropics/skills) 生态里的更多技能；该命令在本地调用
+`npx skills add`，安装完成后可用 `/skills` 查看。使用此功能需要提前安装 Node.js。
 
 ## 开发
 
